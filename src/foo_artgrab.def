@@ -1,0 +1,3 @@
+EXPORTS
+    foobar2000_get_interface
+    foo_artgrab_open
