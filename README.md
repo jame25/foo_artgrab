@@ -1,4 +1,4 @@
-# foo_artgrab
+# foo_artgrab (Artwork Grabber)
 
 A foobar2000 component that lets you browse and download album artwork from multiple online sources. Hover over the artwork panel in [foo_artwork](https://github.com/jame25/foo_artwork) to reveal a download icon, click it to open a gallery of results, preview full-size images, and save your pick as a JPEG to the album folder.
 
@@ -111,3 +111,4 @@ src/
 ## License
 
 See individual source files for licensing information.
+
