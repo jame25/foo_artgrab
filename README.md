@@ -33,7 +33,7 @@ When foo_artwork is also installed, a download arrow icon appears in the bottom-
 2. Hover over the artwork panel -- a download arrow icon appears in the bottom-left corner
 3. Click the icon to open the **Artwork Grabber** gallery
 4. Browse the gallery of results from all enabled APIs
-5. Click a thumbnail to select it; double-click to open a full-size preview
+5. Click a thumbnail to select it; **double-click to open a full-size preview**
 6. Click **Save** to write the selected image as JPEG to the album folder
 7. Hold **Shift** and click **Save** to choose a custom filename/location
 
@@ -111,4 +111,5 @@ src/
 ## License
 
 See individual source files for licensing information.
+
 
