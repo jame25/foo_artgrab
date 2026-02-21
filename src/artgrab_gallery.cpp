@@ -424,8 +424,8 @@ void GalleryWindow::PaintGrid(Gdiplus::Graphics& g)
     COLORREF textColor = GetSysColor(COLOR_WINDOWTEXT);
     Gdiplus::SolidBrush textBrush(Gdiplus::Color(GetRValue(textColor), GetGValue(textColor), GetBValue(textColor)));
     Gdiplus::SolidBrush grayBrush(Gdiplus::Color(130, 130, 130));
-    Gdiplus::Font labelFont(L"Segoe UI", 9, Gdiplus::FontStyleBold);
-    Gdiplus::Font smallFont(L"Segoe UI", 8);
+    Gdiplus::Font labelFont(L"Segoe UI", 14, Gdiplus::FontStyleBold);
+    Gdiplus::Font smallFont(L"Segoe UI", 13);
 
     for (int i = 0; i < (int)m_cells.size(); i++) {
         PaintThumbnail(g, m_cells[i]);
@@ -440,7 +440,7 @@ void GalleryWindow::PaintGrid(Gdiplus::Graphics& g)
             std::wstring wSource(len > 0 ? len - 1 : 0, L'\0');
             if (len > 1) MultiByteToWideChar(CP_UTF8, 0, entry.source.get_ptr(), -1, &wSource[0], len);
 
-            Gdiplus::RectF labelRect((float)lx, (float)ly, (float)THUMB_SIZE, 24.0f);
+            Gdiplus::RectF labelRect((float)lx, (float)ly, (float)THUMB_SIZE, 34.0f);
             g.DrawString(wSource.c_str(), -1, &labelFont, labelRect, nullptr, &textBrush);
         }
 
@@ -449,7 +449,7 @@ void GalleryWindow::PaintGrid(Gdiplus::Graphics& g)
             std::wostringstream ss;
             ss << entry.width << L"x" << entry.height;
             std::wstring res = ss.str();
-            Gdiplus::RectF resRect((float)lx, (float)(ly + 24), (float)THUMB_SIZE, 20.0f);
+            Gdiplus::RectF resRect((float)lx, (float)(ly + 34), (float)THUMB_SIZE, 30.0f);
             g.DrawString(res.c_str(), -1, &smallFont, resRect, nullptr, &grayBrush);
         }
     }
