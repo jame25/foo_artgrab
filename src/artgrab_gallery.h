@@ -110,7 +110,7 @@ private:
     // Layout constants
     static const int THUMB_SIZE = 150;
     static const int THUMB_PADDING = 12;
-    static const int LABEL_HEIGHT = 36;
+    static const int LABEL_HEIGHT = 50;
     static const int STATUS_BAR_HEIGHT = 40;
     static const int MIN_WIDTH = 400;
     static const int MIN_HEIGHT = 300;
