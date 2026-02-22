@@ -795,6 +795,8 @@ void GalleryWindow::DoSave(bool shift_held)
 
     if (status == Gdiplus::Ok) {
         m_status_text = L"Saved to " + wide_path;
+        artgrab::invalidate_artwork_cache(m_artist.c_str(), m_album.c_str());
+        artgrab::refresh_artwork_panel();
     } else {
         m_status_text = L"Save failed";
     }
