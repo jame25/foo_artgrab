@@ -11,3 +11,5 @@ extern cfg_int cfg_ag_retry_count;
 
 // Cache folder cfg_var referenced by async_io_manager
 extern cfg_string cfg_cache_folder;
+extern cfg_bool cfg_ag_include_back_covers;
+extern cfg_bool cfg_ag_include_artist_images;
