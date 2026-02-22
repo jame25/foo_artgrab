@@ -5,12 +5,16 @@
 
 typedef const char* (*pfn_get_key)();
 typedef bool (*pfn_is_api_enabled)(const char*);
+typedef void (*pfn_cache_remove)(const char*, const char*);
+typedef void (*pfn_refresh)();
 
 static pfn_get_key s_get_lastfm_key = nullptr;
 static pfn_get_key s_get_discogs_key = nullptr;
 static pfn_get_key s_get_discogs_consumer_key = nullptr;
 static pfn_get_key s_get_discogs_consumer_secret = nullptr;
 static pfn_is_api_enabled s_is_api_enabled = nullptr;
+static pfn_cache_remove s_cache_remove = nullptr;
+static pfn_refresh s_refresh = nullptr;
 static ULONG_PTR s_gdiplus_token = 0;
 
 void artgrab::initialize() {
@@ -26,6 +30,8 @@ void artgrab::initialize() {
         s_get_discogs_consumer_key = (pfn_get_key)GetProcAddress(hArtwork, "foo_artwork_get_discogs_consumer_key");
         s_get_discogs_consumer_secret = (pfn_get_key)GetProcAddress(hArtwork, "foo_artwork_get_discogs_consumer_secret");
         s_is_api_enabled = (pfn_is_api_enabled)GetProcAddress(hArtwork, "foo_artwork_is_api_enabled");
+        s_cache_remove = (pfn_cache_remove)GetProcAddress(hArtwork, "foo_artwork_cache_remove");
+        s_refresh = (pfn_refresh)GetProcAddress(hArtwork, "foo_artwork_refresh");
     }
 
     // Async I/O init
@@ -70,6 +76,14 @@ pfc::string8 artgrab::get_effective_discogs_consumer_secret() {
         if (key && key[0]) return pfc::string8(key);
     }
     return pfc::string8();
+}
+
+void artgrab::invalidate_artwork_cache(const char* artist, const char* track) {
+    if (s_cache_remove) s_cache_remove(artist, track);
+}
+
+void artgrab::refresh_artwork_panel() {
+    if (s_refresh) s_refresh();
 }
 
 bool artgrab::is_api_enabled(const char* api_name) {
