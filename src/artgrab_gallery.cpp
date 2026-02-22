@@ -9,6 +9,14 @@
 
 #include "artgrab_preferences.h"
 
+static bool is_back_cover(const artgrab::artwork_entry& entry) {
+    return strstr(entry.source.get_ptr(), "(Back)") != nullptr;
+}
+
+static bool is_artist_image(const artgrab::artwork_entry& entry) {
+    return strstr(entry.source.get_ptr(), "(Artist)") != nullptr;
+}
+
 namespace artgrab {
 
 // ---------------------------------------------------------------------------
@@ -89,6 +97,20 @@ LRESULT GalleryWindow::OnCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lPara
         }
     }
 
+    // Add back covers pseudo-APIs if the preference is enabled
+    if (cfg_ag_include_back_covers) {
+        if (artgrab::is_api_enabled("MusicBrainz"))
+            m_api_states.emplace_back("MusicBrainz (Back)");
+        if (artgrab::is_api_enabled("Discogs"))
+            m_api_states.emplace_back("Discogs (Back)");
+    }
+
+    // Add artist images pseudo-API if the preference is enabled
+    if (cfg_ag_include_artist_images) {
+        if (artgrab::is_api_enabled("Deezer"))
+            m_api_states.emplace_back("Deezer (Artist)");
+    }
+
     if (m_status_text.empty()) {
         m_status_text = L"Searching...";
     }
@@ -115,10 +137,10 @@ LRESULT GalleryWindow::OnClose(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam
         m_search->cancel();
     }
     HWND owner = GetWindow(GW_OWNER);
-    DestroyWindow();
     if (owner && ::IsWindow(owner)) {
         ::SetForegroundWindow(owner);
     }
+    DestroyWindow();
     return 0;
 }
 
@@ -194,7 +216,7 @@ LRESULT GalleryWindow::OnPaint(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam
 
         title += wArtist + L" \u2014 " + wAlbum;
     }
-    Gdiplus::RectF titleRect(THUMB_PADDING, 4.0f, (float)(cw - THUMB_PADDING * 2), 26.0f);
+    Gdiplus::RectF titleRect(THUMB_PADDING, 4.0f - m_scroll_y, (float)(cw - THUMB_PADDING * 2), 26.0f);
     g.DrawString(title.c_str(), -1, &titleFont, titleRect, nullptr, &textBrush);
 
     // Paint the thumbnail grid
@@ -340,6 +362,8 @@ void GalleryWindow::StartSearch()
 
     m_search = std::make_shared<artwork_search>(
         m_artist.c_str(), m_album.c_str(), max_results,
+        cfg_ag_include_back_covers.get_value(),
+        cfg_ag_include_artist_images.get_value(),
         on_result_cb, on_api_done_cb, on_all_done_cb);
     m_search->start();
 }
@@ -379,8 +403,22 @@ void GalleryWindow::RecalcLayout()
     int cols = (std::max)(1, (cw - THUMB_PADDING) / (THUMB_SIZE + THUMB_PADDING));
     int title_height = 30;
     int cell_height = THUMB_SIZE + LABEL_HEIGHT + THUMB_PADDING;
+    int separator_height = 28;
 
+    // Separate front, back cover, and artist image indices
+    std::vector<int> front_indices, back_indices, artist_indices;
     for (int i = 0; i < (int)m_cells.size(); i++) {
+        if (is_artist_image(m_cells[i].entry))
+            artist_indices.push_back(i);
+        else if (is_back_cover(m_cells[i].entry))
+            back_indices.push_back(i);
+        else
+            front_indices.push_back(i);
+    }
+
+    // Layout front covers
+    for (int i = 0; i < (int)front_indices.size(); i++) {
+        int idx = front_indices[i];
         int col = i % cols;
         int row = i / cols;
         int x = THUMB_PADDING + col * (THUMB_SIZE + THUMB_PADDING);
@@ -391,11 +429,66 @@ void GalleryWindow::RecalcLayout()
         rc.top = y;
         rc.right = x + THUMB_SIZE;
         rc.bottom = y + THUMB_SIZE + LABEL_HEIGHT;
-        m_cells[i].rect = rc;
+        m_cells[idx].rect = rc;
     }
 
-    int total_rows = m_cells.empty() ? 0 : (((int)m_cells.size() - 1) / cols + 1);
-    m_content_height = title_height + THUMB_PADDING + total_rows * cell_height;
+    int front_rows = front_indices.empty() ? 0 : (((int)front_indices.size() - 1) / cols + 1);
+    int front_bottom = title_height + THUMB_PADDING + front_rows * cell_height;
+
+    // Layout back covers (with separator)
+    int back_top = front_bottom;
+    if (!back_indices.empty()) {
+        back_top += separator_height;
+    }
+
+    for (int i = 0; i < (int)back_indices.size(); i++) {
+        int idx = back_indices[i];
+        int col = i % cols;
+        int row = i / cols;
+        int x = THUMB_PADDING + col * (THUMB_SIZE + THUMB_PADDING);
+        int y = back_top + THUMB_PADDING + row * cell_height - m_scroll_y;
+
+        RECT rc;
+        rc.left = x;
+        rc.top = y;
+        rc.right = x + THUMB_SIZE;
+        rc.bottom = y + THUMB_SIZE + LABEL_HEIGHT;
+        m_cells[idx].rect = rc;
+    }
+
+    int back_rows = back_indices.empty() ? 0 : (((int)back_indices.size() - 1) / cols + 1);
+    int section_bottom = front_bottom;
+    if (!back_indices.empty()) {
+        section_bottom = back_top + THUMB_PADDING + back_rows * cell_height;
+    }
+
+    // Layout artist images (with separator)
+    int artist_top = section_bottom;
+    if (!artist_indices.empty()) {
+        artist_top += separator_height;
+    }
+
+    for (int i = 0; i < (int)artist_indices.size(); i++) {
+        int idx = artist_indices[i];
+        int col = i % cols;
+        int row = i / cols;
+        int x = THUMB_PADDING + col * (THUMB_SIZE + THUMB_PADDING);
+        int y = artist_top + THUMB_PADDING + row * cell_height - m_scroll_y;
+
+        RECT rc;
+        rc.left = x;
+        rc.top = y;
+        rc.right = x + THUMB_SIZE;
+        rc.bottom = y + THUMB_SIZE + LABEL_HEIGHT;
+        m_cells[idx].rect = rc;
+    }
+
+    int artist_rows = artist_indices.empty() ? 0 : (((int)artist_indices.size() - 1) / cols + 1);
+    if (!artist_indices.empty()) {
+        m_content_height = artist_top + THUMB_PADDING + artist_rows * cell_height;
+    } else {
+        m_content_height = section_bottom;
+    }
 
     // Position Save button in the status bar area
     int btn_x = cw - 90;
@@ -424,9 +517,67 @@ void GalleryWindow::PaintGrid(Gdiplus::Graphics& g)
     COLORREF textColor = GetSysColor(COLOR_WINDOWTEXT);
     Gdiplus::SolidBrush textBrush(Gdiplus::Color(GetRValue(textColor), GetGValue(textColor), GetBValue(textColor)));
     Gdiplus::SolidBrush grayBrush(Gdiplus::Color(130, 130, 130));
-    Gdiplus::Font labelFont(L"Segoe UI", 14, Gdiplus::FontStyleBold);
-    Gdiplus::Font smallFont(L"Segoe UI", 13);
+    Gdiplus::Font labelFont(L"Segoe UI", 12, Gdiplus::FontStyleBold);
+    Gdiplus::Font smallFont(L"Segoe UI", 12);
 
+    RECT client;
+    GetClientRect(&client);
+    int cw = client.right - client.left;
+    int cols = (std::max)(1, (cw - THUMB_PADDING) / (THUMB_SIZE + THUMB_PADDING));
+    int title_height = 30;
+    int cell_height = THUMB_SIZE + LABEL_HEIGHT + THUMB_PADDING;
+    int separator_height = 28;
+
+    // Count front covers, back covers, and artist images to know where separators go
+    int front_count = 0;
+    int back_count = 0;
+    bool has_backs = false;
+    bool has_artists = false;
+    for (const auto& cell : m_cells) {
+        if (is_artist_image(cell.entry)) {
+            has_artists = true;
+        } else if (is_back_cover(cell.entry)) {
+            has_backs = true;
+            back_count++;
+        } else {
+            front_count++;
+        }
+    }
+
+    // Draw "Back Covers" separator if there are back covers
+    if (has_backs) {
+        int front_rows = front_count > 0 ? ((front_count - 1) / cols + 1) : 0;
+        int sep_y = title_height + THUMB_PADDING + front_rows * cell_height - m_scroll_y;
+
+        Gdiplus::Pen sepPen(Gdiplus::Color(180, 180, 180));
+        g.DrawLine(&sepPen, THUMB_PADDING, sep_y + 4, cw - THUMB_PADDING, sep_y + 4);
+
+        Gdiplus::Font sepFont(L"Segoe UI", 9, Gdiplus::FontStyleBold);
+        Gdiplus::RectF sepRect((float)THUMB_PADDING, (float)(sep_y + 8), (float)(cw - THUMB_PADDING * 2), 20.0f);
+        g.DrawString(L"Back Covers", -1, &sepFont, sepRect, nullptr, &grayBrush);
+    }
+
+    // Draw "Artist Images" separator if there are artist images
+    if (has_artists) {
+        int front_rows = front_count > 0 ? ((front_count - 1) / cols + 1) : 0;
+        int front_bottom = title_height + THUMB_PADDING + front_rows * cell_height;
+
+        int back_top = front_bottom;
+        if (has_backs) back_top += separator_height;
+        int back_rows = back_count > 0 ? ((back_count - 1) / cols + 1) : 0;
+        int section_bottom = has_backs ? (back_top + THUMB_PADDING + back_rows * cell_height) : front_bottom;
+
+        int sep_y = section_bottom - m_scroll_y;
+
+        Gdiplus::Pen sepPen(Gdiplus::Color(180, 180, 180));
+        g.DrawLine(&sepPen, THUMB_PADDING, sep_y + 4, cw - THUMB_PADDING, sep_y + 4);
+
+        Gdiplus::Font sepFont(L"Segoe UI", 9, Gdiplus::FontStyleBold);
+        Gdiplus::RectF sepRect((float)THUMB_PADDING, (float)(sep_y + 8), (float)(cw - THUMB_PADDING * 2), 20.0f);
+        g.DrawString(L"Artist Images", -1, &sepFont, sepRect, nullptr, &grayBrush);
+    }
+
+    // Draw all thumbnails and labels
     for (int i = 0; i < (int)m_cells.size(); i++) {
         PaintThumbnail(g, m_cells[i]);
 
@@ -436,9 +587,17 @@ void GalleryWindow::PaintGrid(Gdiplus::Graphics& g)
         int ly = m_cells[i].rect.top + THUMB_SIZE + 2;
 
         {
-            int len = MultiByteToWideChar(CP_UTF8, 0, entry.source.get_ptr(), -1, NULL, 0);
+            // Strip internal " (Back)" and " (Artist)" suffixes for display
+            std::string display_source_str(entry.source.get_ptr());
+            size_t back_pos = display_source_str.find(" (Back)");
+            if (back_pos != std::string::npos) display_source_str.erase(back_pos);
+            size_t artist_pos = display_source_str.find(" (Artist)");
+            if (artist_pos != std::string::npos) display_source_str.erase(artist_pos);
+            const char* display_source = display_source_str.c_str();
+
+            int len = MultiByteToWideChar(CP_UTF8, 0, display_source, -1, NULL, 0);
             std::wstring wSource(len > 0 ? len - 1 : 0, L'\0');
-            if (len > 1) MultiByteToWideChar(CP_UTF8, 0, entry.source.get_ptr(), -1, &wSource[0], len);
+            if (len > 1) MultiByteToWideChar(CP_UTF8, 0, display_source, -1, &wSource[0], len);
 
             Gdiplus::RectF labelRect((float)lx, (float)ly, (float)THUMB_SIZE, 34.0f);
             g.DrawString(wSource.c_str(), -1, &labelFont, labelRect, nullptr, &textBrush);
@@ -551,8 +710,9 @@ void GalleryWindow::DoSave(bool shift_held)
 
     const artwork_entry& entry = m_cells[m_selected_index].entry;
 
-    // Build default save path
-    std::string save_path = m_album_folder + "\\" + std::string(cfg_ag_save_filename.get_ptr());
+    // Build default save path (back covers save as "Back.jpg")
+    const char* filename = is_back_cover(entry) ? "Back.jpg" : cfg_ag_save_filename.get_ptr();
+    std::string save_path = m_album_folder + "\\" + std::string(filename);
 
     // Convert to wide string
     int len = MultiByteToWideChar(CP_UTF8, 0, save_path.c_str(), -1, NULL, 0);
