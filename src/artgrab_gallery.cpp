@@ -711,7 +711,7 @@ void GalleryWindow::DoSave(bool shift_held)
     const artwork_entry& entry = m_cells[m_selected_index].entry;
 
     // Build default save path (back covers save as "Back.jpg")
-    const char* filename = is_back_cover(entry) ? "Back.jpg" : cfg_ag_save_filename.get_ptr();
+    const char* filename = is_artist_image(entry) ? cfg_ag_artist_image_filename.get_ptr() : is_back_cover(entry) ? cfg_ag_back_cover_filename.get_ptr() : cfg_ag_save_filename.get_ptr();
     std::string save_path = m_album_folder + "\\" + std::string(filename);
 
     // Convert to wide string
