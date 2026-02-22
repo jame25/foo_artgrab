@@ -19,6 +19,10 @@ static constexpr GUID guid_ag_http_timeout = { 0xb1a2c3d4, 0x0005, 0x0001, { 0xa
 static constexpr GUID guid_ag_retry_count = { 0xb1a2c3d4, 0x0006, 0x0001, { 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18 } };
 // {B1A2C3D4-000D-0001-A1B2-C3D4E5F60718}
 static constexpr GUID guid_ag_cache_folder = { 0xb1a2c3d4, 0x000d, 0x0001, { 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18 } };
+// {B1A2C3D4-000E-0001-A1B2-C3D4E5F60718}
+static constexpr GUID guid_ag_include_back_covers = { 0xb1a2c3d4, 0x000e, 0x0001, { 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18 } };
+// {B1A2C3D4-000F-0001-A1B2-C3D4E5F60718}
+static constexpr GUID guid_ag_include_artist_images = { 0xb1a2c3d4, 0x000f, 0x0001, { 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18 } };
 
 // ============================================================================
 // cfg_var instantiations
@@ -31,6 +35,8 @@ cfg_int cfg_ag_max_results(guid_ag_max_results, 3);
 cfg_int cfg_ag_http_timeout(guid_ag_http_timeout, 10);
 cfg_int cfg_ag_retry_count(guid_ag_retry_count, 2);
 cfg_string cfg_cache_folder(guid_ag_cache_folder, "");
+cfg_bool cfg_ag_include_back_covers(guid_ag_include_back_covers, false);
+cfg_bool cfg_ag_include_artist_images(guid_ag_include_artist_images, false);
 
 // ============================================================================
 // Preferences page class
@@ -104,6 +110,12 @@ void artgrab_preferences::update_controls()
     SetDlgItemInt(m_hwnd, IDC_JPEG_QUALITY, (UINT)cfg_ag_jpeg_quality.get_value(), FALSE);
     SetDlgItemInt(m_hwnd, IDC_MAX_RESULTS, (UINT)cfg_ag_max_results.get_value(), FALSE);
     SetDlgItemInt(m_hwnd, IDC_REQUEST_TIMEOUT, (UINT)cfg_ag_http_timeout.get_value(), FALSE);
+
+    // Back covers checkbox
+    CheckDlgButton(m_hwnd, IDC_INCLUDE_BACK_COVERS, cfg_ag_include_back_covers ? BST_CHECKED : BST_UNCHECKED);
+
+    // Artist images checkbox
+    CheckDlgButton(m_hwnd, IDC_INCLUDE_ARTIST_IMAGES, cfg_ag_include_artist_images ? BST_CHECKED : BST_UNCHECKED);
 }
 
 // ============================================================================
@@ -134,6 +146,12 @@ void artgrab_preferences::apply_settings()
 
     val = GetDlgItemInt(m_hwnd, IDC_REQUEST_TIMEOUT, &ok, FALSE);
     if (ok) cfg_ag_http_timeout = (int)val;
+
+    // Back covers checkbox
+    cfg_ag_include_back_covers = (IsDlgButtonChecked(m_hwnd, IDC_INCLUDE_BACK_COVERS) == BST_CHECKED);
+
+    // Artist images checkbox
+    cfg_ag_include_artist_images = (IsDlgButtonChecked(m_hwnd, IDC_INCLUDE_ARTIST_IMAGES) == BST_CHECKED);
 }
 
 // ============================================================================
@@ -148,6 +166,8 @@ void artgrab_preferences::reset_settings()
     cfg_ag_max_results = 3;
     cfg_ag_http_timeout = 10;
     cfg_ag_retry_count = 2;
+    cfg_ag_include_back_covers = false;
+    cfg_ag_include_artist_images = false;
 
     update_controls();
 }
@@ -185,6 +205,13 @@ INT_PTR CALLBACK artgrab_preferences::ConfigProc(HWND hwnd, UINT msg, WPARAM wp,
 
         case IDC_OVERWRITE_BEHAVIOR:
             if (HIWORD(wp) == CBN_SELCHANGE) {
+                self->on_changed();
+            }
+            break;
+
+        case IDC_INCLUDE_BACK_COVERS:
+        case IDC_INCLUDE_ARTIST_IMAGES:
+            if (HIWORD(wp) == BN_CLICKED) {
                 self->on_changed();
             }
             break;
