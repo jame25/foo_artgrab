@@ -23,12 +23,16 @@ static constexpr GUID guid_ag_cache_folder = { 0xb1a2c3d4, 0x000d, 0x0001, { 0xa
 static constexpr GUID guid_ag_include_back_covers = { 0xb1a2c3d4, 0x000e, 0x0001, { 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18 } };
 // {B1A2C3D4-000F-0001-A1B2-C3D4E5F60718}
 static constexpr GUID guid_ag_include_artist_images = { 0xb1a2c3d4, 0x000f, 0x0001, { 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18 } };
+// {B1A2C3D4-0010-0001-A1B2-C3D4E5F60718}
+static constexpr GUID guid_ag_back_cover_filename = { 0xb1a2c3d4, 0x0010, 0x0001, { 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18 } };
+// {B1A2C3D4-0011-0001-A1B2-C3D4E5F60718}
+static constexpr GUID guid_ag_artist_image_filename = { 0xb1a2c3d4, 0x0011, 0x0001, { 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18 } };
 
 // ============================================================================
 // cfg_var instantiations
 // ============================================================================
 
-cfg_string cfg_ag_save_filename(guid_ag_save_filename, "cover.jpg");
+cfg_string cfg_ag_save_filename(guid_ag_save_filename, "Cover.jpg");
 cfg_int cfg_ag_overwrite(guid_ag_overwrite, 0);             // 0=Ask, 1=Always, 2=Skip
 cfg_int cfg_ag_jpeg_quality(guid_ag_jpeg_quality, 95);
 cfg_int cfg_ag_max_results(guid_ag_max_results, 3);
@@ -37,6 +41,8 @@ cfg_int cfg_ag_retry_count(guid_ag_retry_count, 2);
 cfg_string cfg_cache_folder(guid_ag_cache_folder, "");
 cfg_bool cfg_ag_include_back_covers(guid_ag_include_back_covers, false);
 cfg_bool cfg_ag_include_artist_images(guid_ag_include_artist_images, false);
+cfg_string cfg_ag_back_cover_filename(guid_ag_back_cover_filename, "Back.jpg");
+cfg_string cfg_ag_artist_image_filename(guid_ag_artist_image_filename, "Artist.jpg");
 
 // ============================================================================
 // Preferences page class
@@ -95,8 +101,14 @@ void artgrab_preferences::update_controls()
 {
     if (!m_hwnd) return;
 
-    // Save filename
+    // Cover filename
     SetDlgItemTextA(m_hwnd, IDC_SAVE_FILENAME, cfg_ag_save_filename.get_ptr());
+
+    // Back cover filename
+    SetDlgItemTextA(m_hwnd, IDC_BACK_COVER_FILENAME, cfg_ag_back_cover_filename.get_ptr());
+
+    // Artist image filename
+    SetDlgItemTextA(m_hwnd, IDC_ARTIST_IMAGE_FILENAME, cfg_ag_artist_image_filename.get_ptr());
 
     // Overwrite combo box
     HWND hCombo = GetDlgItem(m_hwnd, IDC_OVERWRITE_BEHAVIOR);
@@ -126,10 +138,18 @@ void artgrab_preferences::apply_settings()
 {
     if (!m_hwnd) return;
 
-    // Save filename
+    // Cover filename
     char buf[512];
     GetDlgItemTextA(m_hwnd, IDC_SAVE_FILENAME, buf, sizeof(buf));
     cfg_ag_save_filename = buf;
+
+    // Back cover filename
+    GetDlgItemTextA(m_hwnd, IDC_BACK_COVER_FILENAME, buf, sizeof(buf));
+    cfg_ag_back_cover_filename = buf;
+
+    // Artist image filename
+    GetDlgItemTextA(m_hwnd, IDC_ARTIST_IMAGE_FILENAME, buf, sizeof(buf));
+    cfg_ag_artist_image_filename = buf;
 
     // Overwrite combo
     int sel = (int)SendDlgItemMessage(m_hwnd, IDC_OVERWRITE_BEHAVIOR, CB_GETCURSEL, 0, 0);
@@ -160,7 +180,9 @@ void artgrab_preferences::apply_settings()
 
 void artgrab_preferences::reset_settings()
 {
-    cfg_ag_save_filename = "cover.jpg";
+    cfg_ag_save_filename = "Cover.jpg";
+    cfg_ag_back_cover_filename = "Back.jpg";
+    cfg_ag_artist_image_filename = "Artist.jpg";
     cfg_ag_overwrite = 0;
     cfg_ag_jpeg_quality = 95;
     cfg_ag_max_results = 3;
@@ -195,6 +217,8 @@ INT_PTR CALLBACK artgrab_preferences::ConfigProc(HWND hwnd, UINT msg, WPARAM wp,
         if (!self) break;
         switch (LOWORD(wp)) {
         case IDC_SAVE_FILENAME:
+        case IDC_BACK_COVER_FILENAME:
+        case IDC_ARTIST_IMAGE_FILENAME:
         case IDC_JPEG_QUALITY:
         case IDC_MAX_RESULTS:
         case IDC_REQUEST_TIMEOUT:
