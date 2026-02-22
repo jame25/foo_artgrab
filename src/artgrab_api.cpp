@@ -124,8 +124,10 @@ static pfc::string8 get_itunes_artwork_url(const json& item) {
 namespace artgrab {
 
 artwork_search::artwork_search(const char* artist, const char* album, int max_results_per_api,
+    bool include_back_covers, bool include_artist_images,
     on_result_callback on_result, on_api_done_callback on_api_done, on_all_done_callback on_all_done)
     : m_artist(artist), m_album(album), m_max_results(max_results_per_api),
+      m_include_back_covers(include_back_covers), m_include_artist_images(include_artist_images),
       m_on_result(on_result), m_on_api_done(on_api_done), m_on_all_done(on_all_done),
       m_apis_remaining(0), m_cancelled(false) {}
 
@@ -145,8 +147,14 @@ void artwork_search::start() {
         if (artgrab::is_api_enabled(api.name)) count++;
     }
 
+    // Back covers count as separate "APIs" for completion tracking
+    if (m_include_back_covers && artgrab::is_api_enabled("MusicBrainz")) count++;
+    if (m_include_back_covers && artgrab::is_api_enabled("Discogs")) count++;
+
+    // Artist images count as a separate "API" for completion tracking
+    if (m_include_artist_images && artgrab::is_api_enabled("Deezer")) count++;
+
     if (count == 0) {
-        // No APIs enabled -- signal immediate completion
         m_apis_remaining = 0;
         m_on_all_done();
         return;
@@ -271,20 +279,29 @@ void artwork_search::search_deezer() {
     pfc::string8 artist_str = m_artist;
     pfc::string8 album_str = m_album;
     int max_results = m_max_results;
+    bool do_artist_images = m_include_artist_images;
 
     auto self = shared_from_this();
     async_io_manager::instance().http_get_async(url,
-        [self, artist_str, album_str, max_results](bool success, const pfc::string8& response, const pfc::string8& error) {
-            if (self->m_cancelled) { self->api_finished("Deezer", false); return; }
+        [self, artist_str, album_str, max_results, do_artist_images](bool success, const pfc::string8& response, const pfc::string8& error) {
+            if (self->m_cancelled) {
+                self->api_finished("Deezer", false);
+                if (do_artist_images) self->api_finished("Deezer (Artist)", false);
+                return;
+            }
 
             if (!success) {
                 self->api_finished("Deezer", false);
+                if (do_artist_images) self->api_finished("Deezer (Artist)", false);
                 return;
             }
 
             std::vector<pfc::string8> urls;
-            if (!parse_deezer_json_multi(artist_str, album_str, response, urls, max_results) || urls.empty()) {
+            std::vector<pfc::string8> artist_ids;
+            if (!parse_deezer_json_multi(artist_str, album_str, response, urls, max_results,
+                    do_artist_images ? &artist_ids : nullptr) || urls.empty()) {
                 self->api_finished("Deezer", false);
+                if (do_artist_images) self->api_finished("Deezer (Artist)", false);
                 return;
             }
 
@@ -292,6 +309,12 @@ void artwork_search::search_deezer() {
             auto had_any = std::make_shared<std::atomic<bool>>(false);
             for (const auto& img_url : urls) {
                 self->download_and_deliver(img_url.get_ptr(), "Deezer", pending, had_any, "Deezer");
+            }
+
+            if (do_artist_images && !artist_ids.empty()) {
+                self->fetch_artist_images(artist_ids);
+            } else if (do_artist_images) {
+                self->api_finished("Deezer (Artist)", false);
             }
         });
 }
@@ -352,32 +375,102 @@ void artwork_search::search_musicbrainz() {
 
     pfc::string8 artist_str = m_artist;
     int max_results = m_max_results;
+    bool do_back_covers = m_include_back_covers;
 
     auto self = shared_from_this();
     async_io_manager::instance().http_get_async(url,
-        [self, artist_str, max_results](bool success, const pfc::string8& response, const pfc::string8& error) {
-            if (self->m_cancelled) { self->api_finished("MusicBrainz", false); return; }
+        [self, artist_str, max_results, do_back_covers](bool success, const pfc::string8& response, const pfc::string8& error) {
+            if (self->m_cancelled) {
+                self->api_finished("MusicBrainz", false);
+                if (do_back_covers) self->api_finished("MusicBrainz (Back)", false);
+                return;
+            }
 
             if (!success) {
                 self->api_finished("MusicBrainz", false);
+                if (do_back_covers) self->api_finished("MusicBrainz (Back)", false);
                 return;
             }
 
             std::vector<pfc::string8> release_ids;
             if (!parse_musicbrainz_json_multi(response, release_ids, artist_str.get_ptr(), max_results) || release_ids.empty()) {
                 self->api_finished("MusicBrainz", false);
+                if (do_back_covers) self->api_finished("MusicBrainz (Back)", false);
                 return;
             }
 
-            // Each release ID becomes a CoverArtArchive download
-            auto pending = std::make_shared<std::atomic<int>>((int)release_ids.size());
-            auto had_any = std::make_shared<std::atomic<bool>>(false);
+            // Front covers: direct /front downloads
+            auto front_pending = std::make_shared<std::atomic<int>>((int)release_ids.size());
+            auto front_had_any = std::make_shared<std::atomic<bool>>(false);
             for (const auto& id : release_ids) {
                 pfc::string8 coverart_url = "http://coverartarchive.org/release/";
                 coverart_url << id << "/front";
-                self->download_and_deliver(coverart_url.get_ptr(), "MusicBrainz", pending, had_any, "MusicBrainz");
+                self->download_and_deliver(coverart_url.get_ptr(), "MusicBrainz", front_pending, front_had_any, "MusicBrainz");
+            }
+
+            // Back covers: fetch full CAA JSON per release
+            if (do_back_covers) {
+                self->fetch_back_covers(release_ids);
             }
         });
+}
+
+// ============================================================================
+// fetch_back_covers -- Fetches back covers from CAA JSON for given release IDs
+// ============================================================================
+
+void artwork_search::fetch_back_covers(const std::vector<pfc::string8>& release_ids) {
+    auto pending = std::make_shared<std::atomic<int>>((int)release_ids.size());
+    auto had_any = std::make_shared<std::atomic<bool>>(false);
+    auto self = shared_from_this();
+
+    for (const auto& id : release_ids) {
+        pfc::string8 caa_url = "http://coverartarchive.org/release/";
+        caa_url << id;
+
+        async_io_manager::instance().http_get_async(caa_url,
+            [self, pending, had_any](bool success, const pfc::string8& response, const pfc::string8& error) {
+                if (self->m_cancelled) {
+                    int remaining = --(*pending);
+                    if (remaining == 0) self->api_finished("MusicBrainz (Back)", had_any->load());
+                    return;
+                }
+
+                if (success) {
+                    try {
+                        using json = nlohmann::json;
+                        json data = json::parse(std::string(response.get_ptr()));
+                        if (data.contains("images") && data["images"].is_array()) {
+                            for (const auto& img : data["images"]) {
+                                bool is_back = false;
+                                if (img.contains("back") && img["back"].is_boolean() && img["back"].get<bool>()) {
+                                    is_back = true;
+                                }
+                                if (!is_back && img.contains("types") && img["types"].is_array()) {
+                                    for (const auto& t : img["types"]) {
+                                        if (t.is_string() && t.get<std::string>() == "Back") {
+                                            is_back = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (is_back && img.contains("image") && img["image"].is_string()) {
+                                    pfc::string8 img_url = img["image"].get<std::string>().c_str();
+                                    self->download_and_deliver(img_url.get_ptr(), "MusicBrainz (Back)", pending, had_any, "MusicBrainz (Back)");
+                                    return; // Take first back cover per release
+                                }
+                            }
+                        }
+                    } catch (const std::exception&) {}
+                }
+
+                // No back cover found for this release, or parse error
+                int remaining = --(*pending);
+                if (remaining == 0) {
+                    self->api_finished("MusicBrainz (Back)", had_any->load());
+                }
+            });
+    }
 }
 
 // ============================================================================
@@ -415,19 +508,29 @@ void artwork_search::search_discogs() {
     pfc::string8 album_str = m_album;
     int max_results = m_max_results;
 
+    bool do_back_covers = m_include_back_covers;
+
     auto self = shared_from_this();
     async_io_manager::instance().http_get_async(url,
-        [self, artist_str, album_str, max_results](bool success, const pfc::string8& response, const pfc::string8& error) {
-            if (self->m_cancelled) { self->api_finished("Discogs", false); return; }
+        [self, artist_str, album_str, max_results, do_back_covers](bool success, const pfc::string8& response, const pfc::string8& error) {
+            if (self->m_cancelled) {
+                self->api_finished("Discogs", false);
+                if (do_back_covers) self->api_finished("Discogs (Back)", false);
+                return;
+            }
 
             if (!success) {
                 self->api_finished("Discogs", false);
+                if (do_back_covers) self->api_finished("Discogs (Back)", false);
                 return;
             }
 
             std::vector<pfc::string8> urls;
-            if (!parse_discogs_json_multi(artist_str, album_str, response, urls, max_results) || urls.empty()) {
+            std::vector<pfc::string8> release_ids;
+            if (!parse_discogs_json_multi(artist_str, album_str, response, urls, max_results,
+                    do_back_covers ? &release_ids : nullptr) || urls.empty()) {
                 self->api_finished("Discogs", false);
+                if (do_back_covers) self->api_finished("Discogs (Back)", false);
                 return;
             }
 
@@ -436,7 +539,119 @@ void artwork_search::search_discogs() {
             for (const auto& img_url : urls) {
                 self->download_and_deliver(img_url.get_ptr(), "Discogs", pending, had_any, "Discogs");
             }
+
+            if (do_back_covers && !release_ids.empty()) {
+                self->fetch_discogs_back_covers(release_ids);
+            } else if (do_back_covers) {
+                self->api_finished("Discogs (Back)", false);
+            }
         });
+}
+
+// ============================================================================
+// fetch_discogs_back_covers -- Fetches secondary images from Discogs releases
+// ============================================================================
+
+void artwork_search::fetch_discogs_back_covers(const std::vector<pfc::string8>& release_ids) {
+    pfc::string8 token = get_effective_discogs_key();
+    pfc::string8 consumer_key = get_effective_discogs_consumer_key();
+    pfc::string8 consumer_secret = get_effective_discogs_consumer_secret();
+
+    auto pending = std::make_shared<std::atomic<int>>((int)release_ids.size());
+    auto had_any = std::make_shared<std::atomic<bool>>(false);
+    auto self = shared_from_this();
+
+    for (const auto& id : release_ids) {
+        pfc::string8 url = "https://api.discogs.com/releases/";
+        url << id;
+
+        if (!token.is_empty()) {
+            url << "?token=" << artgrab::url_encode(token);
+        } else {
+            url << "?key=" << artgrab::url_encode(consumer_key);
+            url << "&secret=" << artgrab::url_encode(consumer_secret);
+        }
+
+        async_io_manager::instance().http_get_async(url,
+            [self, pending, had_any](bool success, const pfc::string8& response, const pfc::string8& error) {
+                if (self->m_cancelled) {
+                    int remaining = --(*pending);
+                    if (remaining == 0) self->api_finished("Discogs (Back)", had_any->load());
+                    return;
+                }
+
+                if (success) {
+                    try {
+                        using json = nlohmann::json;
+                        json data = json::parse(std::string(response.get_ptr()));
+                        if (data.contains("images") && data["images"].is_array()) {
+                            for (const auto& img : data["images"]) {
+                                if (img.contains("type") && img["type"].is_string()
+                                    && img["type"].get<std::string>() == "secondary"
+                                    && img.contains("uri") && img["uri"].is_string()) {
+                                    pfc::string8 img_url = img["uri"].get<std::string>().c_str();
+                                    self->download_and_deliver(img_url.get_ptr(), "Discogs (Back)", pending, had_any, "Discogs (Back)");
+                                    return; // Take first secondary image per release
+                                }
+                            }
+                        }
+                    } catch (const std::exception&) {}
+                }
+
+                int remaining = --(*pending);
+                if (remaining == 0) {
+                    self->api_finished("Discogs (Back)", had_any->load());
+                }
+            });
+    }
+}
+
+// ============================================================================
+// fetch_artist_images -- Fetches artist profile pictures from Deezer
+// ============================================================================
+
+void artwork_search::fetch_artist_images(const std::vector<pfc::string8>& artist_ids) {
+    auto pending = std::make_shared<std::atomic<int>>((int)artist_ids.size());
+    auto had_any = std::make_shared<std::atomic<bool>>(false);
+    auto self = shared_from_this();
+
+    for (const auto& id : artist_ids) {
+        pfc::string8 url = "https://api.deezer.com/artist/";
+        url << id;
+
+        async_io_manager::instance().http_get_async(url,
+            [self, pending, had_any](bool success, const pfc::string8& response, const pfc::string8& error) {
+                if (self->m_cancelled) {
+                    int remaining = --(*pending);
+                    if (remaining == 0) self->api_finished("Deezer (Artist)", had_any->load());
+                    return;
+                }
+
+                if (success) {
+                    try {
+                        using json = nlohmann::json;
+                        json data = json::parse(std::string(response.get_ptr()));
+
+                        pfc::string8 img_url;
+                        if (data.contains("picture_xl") && data["picture_xl"].is_string()) {
+                            img_url = data["picture_xl"].get<std::string>().c_str();
+                        } else if (data.contains("picture_big") && data["picture_big"].is_string()) {
+                            img_url = data["picture_big"].get<std::string>().c_str();
+                        }
+
+                        if (!img_url.is_empty()) {
+                            self->download_and_deliver(img_url.get_ptr(), "Deezer (Artist)", pending, had_any, "Deezer (Artist)");
+                            return;
+                        }
+                    } catch (const std::exception&) {}
+                }
+
+                int remaining = --(*pending);
+                if (remaining == 0) {
+                    self->api_finished("Deezer (Artist)", had_any->load());
+                }
+            });
+    }
 }
 
 // ============================================================================
@@ -508,7 +723,8 @@ bool artwork_search::parse_itunes_json_multi(const char* artist, const char* alb
 }
 
 bool artwork_search::parse_deezer_json_multi(const char* artist, const char* album,
-    const pfc::string8& json_in, std::vector<pfc::string8>& urls, int max_results) {
+    const pfc::string8& json_in, std::vector<pfc::string8>& urls, int max_results,
+    std::vector<pfc::string8>* artist_ids) {
     try {
         std::string json_data(json_in.get_ptr());
         json data = json::parse(json_data);
@@ -526,6 +742,18 @@ bool artwork_search::parse_deezer_json_multi(const char* artist, const char* alb
         std::string artist_str(artist);
         std::string album_str(album);
         std::set<std::string> seen_urls;
+        std::set<std::string> seen_artist_ids;
+
+        // Helper to extract artist ID from a Deezer search result item
+        auto collect_artist_id = [&](const json& item) {
+            if (artist_ids && item.contains("artist") && item["artist"].contains("id") && item["artist"]["id"].is_number_integer()) {
+                std::string id = std::to_string(item["artist"]["id"].get<int64_t>());
+                if (seen_artist_ids.find(id) == seen_artist_ids.end()) {
+                    seen_artist_ids.insert(id);
+                    artist_ids->push_back(id.c_str());
+                }
+            }
+        };
 
         // Pass 1: exact artist+title match
         for (const auto& item : results) {
@@ -552,6 +780,7 @@ bool artwork_search::parse_deezer_json_multi(const char* artist, const char* alb
                         urls.push_back(art_url);
                     }
                 }
+                collect_artist_id(item);
             }
         }
 
@@ -572,6 +801,7 @@ bool artwork_search::parse_deezer_json_multi(const char* artist, const char* alb
             if (!art_url.is_empty()) {
                 art_url = unescape_json_slashes(art_url);
                 art_url.replace_string("1000x1000", "1200x1200");
+                collect_artist_id(item);
 
                 std::string url_key(art_url.get_ptr());
                 if (seen_urls.find(url_key) == seen_urls.end()) {
@@ -634,7 +864,8 @@ bool artwork_search::parse_lastfm_json_multi(const pfc::string8& json_in,
 }
 
 bool artwork_search::parse_discogs_json_multi(const char* artist, const char* album,
-    const pfc::string8& json_in, std::vector<pfc::string8>& urls, int max_results) {
+    const pfc::string8& json_in, std::vector<pfc::string8>& urls, int max_results,
+    std::vector<pfc::string8>* release_ids) {
     try {
         std::string json_data(json_in.get_ptr());
         json data = json::parse(json_data);
@@ -646,6 +877,33 @@ bool artwork_search::parse_discogs_json_multi(const char* artist, const char* al
         std::string artist_str(artist);
         std::string album_str(album);
         std::set<std::string> seen_urls;
+        std::set<std::string> seen_ids;
+
+        // Helper: extract URL and release ID from a matched item
+        auto collect_item = [&](const json& item) {
+            pfc::string8 art_url;
+            if (item.contains("cover_image") && !item["cover_image"].get<std::string>().empty()) {
+                art_url = item["cover_image"].get<std::string>().c_str();
+            } else if (item.contains("thumb") && !item["thumb"].get<std::string>().empty()) {
+                art_url = item["thumb"].get<std::string>().c_str();
+            }
+
+            if (!art_url.is_empty()) {
+                std::string url_key(art_url.get_ptr());
+                if (seen_urls.find(url_key) == seen_urls.end()) {
+                    seen_urls.insert(url_key);
+                    urls.push_back(art_url);
+
+                    if (release_ids && item.contains("id") && item["id"].is_number_integer()) {
+                        std::string id = std::to_string(item["id"].get<int>());
+                        if (seen_ids.find(id) == seen_ids.end()) {
+                            seen_ids.insert(id);
+                            release_ids->push_back(id.c_str());
+                        }
+                    }
+                }
+            }
+        };
 
         // Discogs title format: "Artist - Album"
         std::string artist_title = artist_str + " - " + album_str;
@@ -656,20 +914,7 @@ bool artwork_search::parse_discogs_json_multi(const char* artist, const char* al
 
             std::string result_title = item["title"].get<std::string>();
             if (strings_match_fuzzy(result_title, artist_title)) {
-                pfc::string8 art_url;
-                if (item.contains("cover_image") && !item["cover_image"].get<std::string>().empty()) {
-                    art_url = item["cover_image"].get<std::string>().c_str();
-                } else if (item.contains("thumb") && !item["thumb"].get<std::string>().empty()) {
-                    art_url = item["thumb"].get<std::string>().c_str();
-                }
-
-                if (!art_url.is_empty()) {
-                    std::string url_key(art_url.get_ptr());
-                    if (seen_urls.find(url_key) == seen_urls.end()) {
-                        seen_urls.insert(url_key);
-                        urls.push_back(art_url);
-                    }
-                }
+                collect_item(item);
             }
         }
 
@@ -694,21 +939,7 @@ bool artwork_search::parse_discogs_json_multi(const char* artist, const char* al
             }
 
             if (!artist_matches) continue;
-
-            pfc::string8 art_url;
-            if (item.contains("cover_image") && !item["cover_image"].get<std::string>().empty()) {
-                art_url = item["cover_image"].get<std::string>().c_str();
-            } else if (item.contains("thumb") && !item["thumb"].get<std::string>().empty()) {
-                art_url = item["thumb"].get<std::string>().c_str();
-            }
-
-            if (!art_url.is_empty()) {
-                std::string url_key(art_url.get_ptr());
-                if (seen_urls.find(url_key) == seen_urls.end()) {
-                    seen_urls.insert(url_key);
-                    urls.push_back(art_url);
-                }
-            }
+            collect_item(item);
         }
 
         return !urls.empty();
