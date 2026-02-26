@@ -112,4 +112,33 @@ src/
 
 See individual source files for licensing information.
 
+## Support Development
+
+If you find these components useful, consider supporting development:
+
+| Platform | Payment Methods |
+|----------|----------------|
+| **[Ko-fi](https://ko-fi.com/Jame25)** | Cards, PayPal |
+
+Your support helps cover development time and enables new features. Thank you! 🙏
+
+---
+
+## 支持开发
+
+如果您觉得这些组件有用，请考虑支持开发：
+
+| 平台 | 支付方式 |
+|------|----------|
+| **[Ko-fi](https://ko-fi.com/Jame25)** | 银行卡、PayPal |
+
+您的支持有助于支付开发时间并实现新功能。谢谢！🙏
+
+---
+
+**Feature Requests:** Paid feature requests are available for supporters. [Contact me on Discord](https://discord.gg/YB5D5t3x) to discuss.
+
+**功能请求：** 为支持者提供付费功能请求。[请在 Discord 上联系我](https://discord.gg/YB5D5t3x) 进行讨论。
+
+
 
