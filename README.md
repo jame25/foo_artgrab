@@ -1,22 +1,24 @@
 # foo_artgrab (Artwork Grabber)
 
-A foobar2000 component that lets you browse and download album artwork from multiple online sources. Hover over the artwork panel in [foo_artwork](https://github.com/jame25/foo_artwork) to reveal a download icon, click it to open a gallery of results, preview full-size images, and save your pick as a JPEG to the album folder.
+A foobar2000 component that lets you browse and download album artwork from multiple online sources. Hover over the artwork panel in [foo_artwork](https://github.com/jame25/foo_artwork) to reveal a download icon, or right-click any track and select **Utilities > Grab artwork**. Browse a gallery of results, preview full-size images, and save your pick as JPEG or PNG to the album folder.
 
 ## Features
 
 - Searches only the APIs enabled in foo_artwork preferences (iTunes, Deezer, Last.fm, MusicBrainz/CoverArtArchive, Discogs)
 - Up to 3 results per API, displayed progressively as they arrive
 - Full-size image preview with fit-to-window / original-size toggle and pan/drag
-- Save as JPEG with configurable quality (default 95)
+- Save as JPEG or PNG (configurable in preferences)
 - Shift+Save opens a Save As dialog for custom filename/location
 - Configurable overwrite behavior (ask / always / skip)
+- Right-click context menu: **Utilities > Grab artwork**
 - Inherits API keys and enabled API settings from foo_artwork automatically
+- Broad Unicode normalization for matching (Latin, Cyrillic, Greek)
 - Download icon hidden for internet streams (radio, YouTube, etc.)
 
 ## Requirements
 
 - foobar2000 v1.6+ (64-bit recommended)
-- [foo_artwork](https://github.com/jame25/foo_artwork) (provides the download icon overlay on the artwork panel)
+- [foo_artwork](https://github.com/jame25/foo_artwork)
 - API keys for Last.fm and Discogs configured in foo_artwork preferences
 
 iTunes, Deezer, and MusicBrainz require no API keys.
@@ -25,17 +27,15 @@ iTunes, Deezer, and MusicBrainz require no API keys.
 
 Copy `foo_artgrab.dll` into foobar2000's `components` directory and restart foobar2000.
 
-When foo_artwork is also installed, a download arrow icon appears in the bottom-left corner of the artwork panel on mouse hover. If foo_artwork is not installed, foo_artgrab does nothing (it has no standalone UI entry point).
+When foo_artwork is also installed, a download arrow icon appears in the bottom-left corner of the artwork panel on mouse hover.
 
 ## Usage
 
-1. Play a track so foo_artwork displays its artwork panel
-2. Hover over the artwork panel -- a download arrow icon appears in the bottom-left corner
-3. Click the icon to open the **Artwork Grabber** gallery
-4. Browse the gallery of results from all enabled APIs
-5. Click a thumbnail to select it; **double-click to open a full-size preview**
-6. Click **Save** to write the selected image as JPEG to the album folder
-7. Hold **Shift** and click **Save** to choose a custom filename/location
+1. Right-click a track and select **Utilities > Grab artwork**, or hover over the foo_artwork panel and click the download arrow icon
+2. Browse the gallery of results from all enabled APIs
+3. Click a thumbnail to select it; double-click to open a full-size preview
+4. Click **Save** to write the selected image to the album folder
+5. Hold **Shift** and click **Save** to choose a custom filename/location
 
 ## Preferences
 
@@ -43,11 +43,16 @@ Found under **Preferences > Tools > Artwork Grabber**.
 
 | Setting | Default | Description |
 |---|---|---|
-| Save filename | `cover.jpg` | Default filename written to the album folder |
+| Cover filename | `Cover.jpg` | Default filename written to the album folder |
+| Back cover filename | `Back.jpg` | Filename for back cover images |
+| Artist image | `Artist.jpg` | Filename for artist images |
+| Save format | JPEG | Save as JPEG or PNG (filenames update automatically) |
 | Overwrite behavior | Ask every time | Ask / Always overwrite / Skip if exists |
-| JPEG quality | 95 | Encoding quality (50-100) |
+| JPEG quality | 95 | Encoding quality (50-100, disabled when format is PNG) |
 | Max results per API | 3 | How many images to fetch per API (1-5) |
 | Request timeout | 10s | HTTP timeout per request |
+| Include back covers | Off | Fetch back covers from MusicBrainz/Discogs |
+| Include artist images | Off | Fetch artist images from Deezer |
 
 API keys and enabled APIs are configured in **Preferences > Tools > Artwork Display** (foo_artwork).
 
@@ -97,7 +102,8 @@ src/
   artgrab_gallery.cpp/h     Gallery dialog (ATL CWindowImpl, thumbnail grid)
   artgrab_preview.cpp/h     Full-size image preview popup
   artgrab_preferences.cpp/h Preferences page (save settings only)
-  artgrab_utils.cpp/h       String matching, URL encoding, image validation
+  artgrab_contextmenu.cpp   Right-click context menu integration
+  artgrab_utils.cpp/h       String matching, URL encoding, image validation, Unicode normalization
   async_io_manager.cpp/h    Thread pool, WinHTTP, caching (from foo_artwork)
   webp_decoder.cpp/h        WebP image support (from foo_artwork)
   nlohmann/                 JSON library (header-only)
@@ -139,6 +145,7 @@ Your support helps cover development time and enables new features. Thank you! �
 **Feature Requests:** Paid feature requests are available for supporters. [Contact me on Discord](https://discord.gg/YB5D5t3x) to discuss.
 
 **功能请求：** 为支持者提供付费功能请求。[请在 Discord 上联系我](https://discord.gg/YB5D5t3x) 进行讨论。
+
 
 
 
