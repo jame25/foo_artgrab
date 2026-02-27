@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "artgrab_preferences.h"
+#include <string>
 
 // ============================================================================
 // GUIDs for cfg_vars
@@ -27,6 +28,8 @@ static constexpr GUID guid_ag_include_artist_images = { 0xb1a2c3d4, 0x000f, 0x00
 static constexpr GUID guid_ag_back_cover_filename = { 0xb1a2c3d4, 0x0010, 0x0001, { 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18 } };
 // {B1A2C3D4-0011-0001-A1B2-C3D4E5F60718}
 static constexpr GUID guid_ag_artist_image_filename = { 0xb1a2c3d4, 0x0011, 0x0001, { 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18 } };
+// {B1A2C3D4-0012-0001-A1B2-C3D4E5F60718}
+static constexpr GUID guid_ag_save_format = { 0xb1a2c3d4, 0x0012, 0x0001, { 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18 } };
 
 // ============================================================================
 // cfg_var instantiations
@@ -43,6 +46,7 @@ cfg_bool cfg_ag_include_back_covers(guid_ag_include_back_covers, false);
 cfg_bool cfg_ag_include_artist_images(guid_ag_include_artist_images, false);
 cfg_string cfg_ag_back_cover_filename(guid_ag_back_cover_filename, "Back.jpg");
 cfg_string cfg_ag_artist_image_filename(guid_ag_artist_image_filename, "Artist.jpg");
+cfg_int cfg_ag_save_format(guid_ag_save_format, 0);  // 0=JPEG, 1=PNG
 
 // ============================================================================
 // Preferences page class
@@ -110,6 +114,18 @@ void artgrab_preferences::update_controls()
     // Artist image filename
     SetDlgItemTextA(m_hwnd, IDC_ARTIST_IMAGE_FILENAME, cfg_ag_artist_image_filename.get_ptr());
 
+    // Save format combo box
+    HWND hFormat = GetDlgItem(m_hwnd, IDC_SAVE_FORMAT);
+    SendMessage(hFormat, CB_RESETCONTENT, 0, 0);
+    SendMessageA(hFormat, CB_ADDSTRING, 0, (LPARAM)"JPEG");
+    SendMessageA(hFormat, CB_ADDSTRING, 0, (LPARAM)"PNG");
+    SendMessage(hFormat, CB_SETCURSEL, (WPARAM)cfg_ag_save_format.get_value(), 0);
+
+    // Enable/disable JPEG quality based on format
+    BOOL jpeg_selected = (cfg_ag_save_format.get_value() == 0);
+    ::EnableWindow(GetDlgItem(m_hwnd, IDC_JPEG_QUALITY), jpeg_selected);
+    ::EnableWindow(GetDlgItem(m_hwnd, IDC_STATIC_QUALITY), jpeg_selected);
+
     // Overwrite combo box
     HWND hCombo = GetDlgItem(m_hwnd, IDC_OVERWRITE_BEHAVIOR);
     SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
@@ -151,6 +167,10 @@ void artgrab_preferences::apply_settings()
     GetDlgItemTextA(m_hwnd, IDC_ARTIST_IMAGE_FILENAME, buf, sizeof(buf));
     cfg_ag_artist_image_filename = buf;
 
+    // Save format
+    int fmt = (int)SendDlgItemMessage(m_hwnd, IDC_SAVE_FORMAT, CB_GETCURSEL, 0, 0);
+    if (fmt != CB_ERR) cfg_ag_save_format = fmt;
+
     // Overwrite combo
     int sel = (int)SendDlgItemMessage(m_hwnd, IDC_OVERWRITE_BEHAVIOR, CB_GETCURSEL, 0, 0);
     if (sel != CB_ERR) cfg_ag_overwrite = sel;
@@ -183,6 +203,7 @@ void artgrab_preferences::reset_settings()
     cfg_ag_save_filename = "Cover.jpg";
     cfg_ag_back_cover_filename = "Back.jpg";
     cfg_ag_artist_image_filename = "Artist.jpg";
+    cfg_ag_save_format = 0;
     cfg_ag_overwrite = 0;
     cfg_ag_jpeg_quality = 95;
     cfg_ag_max_results = 3;
@@ -224,6 +245,32 @@ INT_PTR CALLBACK artgrab_preferences::ConfigProc(HWND hwnd, UINT msg, WPARAM wp,
         case IDC_REQUEST_TIMEOUT:
             if (HIWORD(wp) == EN_CHANGE) {
                 self->on_changed();
+            }
+            break;
+
+        case IDC_SAVE_FORMAT:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                self->on_changed();
+                int fmt = (int)SendDlgItemMessage(hwnd, IDC_SAVE_FORMAT, CB_GETCURSEL, 0, 0);
+                BOOL jpeg_selected = (fmt == 0);
+                ::EnableWindow(GetDlgItem(hwnd, IDC_JPEG_QUALITY), jpeg_selected);
+                ::EnableWindow(GetDlgItem(hwnd, IDC_STATIC_QUALITY), jpeg_selected);
+
+                // Update filename extensions to match selected format
+                const char* new_ext = jpeg_selected ? ".jpg" : ".png";
+                int filename_ids[] = { IDC_SAVE_FILENAME, IDC_BACK_COVER_FILENAME, IDC_ARTIST_IMAGE_FILENAME };
+                for (int id : filename_ids) {
+                    char buf[512];
+                    GetDlgItemTextA(hwnd, id, buf, sizeof(buf));
+                    std::string name(buf);
+                    size_t dot = name.rfind('.');
+                    if (dot != std::string::npos) {
+                        name = name.substr(0, dot) + new_ext;
+                    } else {
+                        name += new_ext;
+                    }
+                    SetDlgItemTextA(hwnd, id, name.c_str());
+                }
             }
             break;
 
