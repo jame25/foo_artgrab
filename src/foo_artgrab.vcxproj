@@ -243,6 +243,7 @@
     <ClCompile Include="artgrab_preview.cpp" />
     <ClCompile Include="artgrab_preferences.cpp" />
     <ClCompile Include="artgrab_entry.cpp" />
+    <ClCompile Include="artgrab_contextmenu.cpp" />
     <!-- Files that don't use the precompiled header -->
     <ClCompile Include="webp_decoder.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
