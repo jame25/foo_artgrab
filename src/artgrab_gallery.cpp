@@ -17,6 +17,14 @@ static bool is_artist_image(const artgrab::artwork_entry& entry) {
     return strstr(entry.source.get_ptr(), "(Artist)") != nullptr;
 }
 
+static std::string replace_extension(const std::string& filename, const char* new_ext) {
+    size_t dot = filename.rfind('.');
+    if (dot != std::string::npos) {
+        return filename.substr(0, dot) + new_ext;
+    }
+    return filename + new_ext;
+}
+
 namespace artgrab {
 
 // ---------------------------------------------------------------------------
@@ -710,9 +718,11 @@ void GalleryWindow::DoSave(bool shift_held)
 
     const artwork_entry& entry = m_cells[m_selected_index].entry;
 
-    // Build default save path (back covers save as "Back.jpg")
-    const char* filename = is_artist_image(entry) ? cfg_ag_artist_image_filename.get_ptr() : is_back_cover(entry) ? cfg_ag_back_cover_filename.get_ptr() : cfg_ag_save_filename.get_ptr();
-    std::string save_path = m_album_folder + "\\" + std::string(filename);
+    // Build default save path using configured format (JPEG or PNG)
+    const char* base_filename = is_artist_image(entry) ? cfg_ag_artist_image_filename.get_ptr() : is_back_cover(entry) ? cfg_ag_back_cover_filename.get_ptr() : cfg_ag_save_filename.get_ptr();
+    bool use_png = (cfg_ag_save_format.get_value() == 1);
+    std::string final_filename = replace_extension(std::string(base_filename), use_png ? ".png" : ".jpg");
+    std::string save_path = m_album_folder + "\\" + final_filename;
 
     // Convert to wide string
     int len = MultiByteToWideChar(CP_UTF8, 0, save_path.c_str(), -1, NULL, 0);
@@ -729,8 +739,13 @@ void GalleryWindow::DoSave(bool shift_held)
         ofn.hwndOwner = m_hWnd;
         ofn.lpstrFile = szFile;
         ofn.nMaxFile = MAX_PATH;
-        ofn.lpstrFilter = L"JPEG Files (*.jpg)\0*.jpg\0All Files (*.*)\0*.*\0";
-        ofn.lpstrDefExt = L"jpg";
+        if (use_png) {
+            ofn.lpstrFilter = L"PNG Files (*.png)\0*.png\0All Files (*.*)\0*.*\0";
+            ofn.lpstrDefExt = L"png";
+        } else {
+            ofn.lpstrFilter = L"JPEG Files (*.jpg)\0*.jpg\0All Files (*.*)\0*.*\0";
+            ofn.lpstrDefExt = L"jpg";
+        }
         ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
 
         if (!GetSaveFileNameW(&ofn)) {
@@ -776,22 +791,27 @@ void GalleryWindow::DoSave(bool shift_held)
         return;
     }
 
-    CLSID jpegClsid;
-    if (GetEncoderClsid(L"image/jpeg", &jpegClsid) < 0) {
-        m_status_text = L"Save failed: JPEG encoder not found";
+    CLSID encoderClsid;
+    const WCHAR* mime = use_png ? L"image/png" : L"image/jpeg";
+    if (GetEncoderClsid(mime, &encoderClsid) < 0) {
+        m_status_text = use_png ? L"Save failed: PNG encoder not found" : L"Save failed: JPEG encoder not found";
         InvalidateRect(NULL, FALSE);
         return;
     }
 
-    Gdiplus::EncoderParameters params;
-    ULONG quality = (ULONG)cfg_ag_jpeg_quality.get_value();
-    params.Count = 1;
-    params.Parameter[0].Guid = Gdiplus::EncoderQuality;
-    params.Parameter[0].Type = Gdiplus::EncoderParameterValueTypeLong;
-    params.Parameter[0].NumberOfValues = 1;
-    params.Parameter[0].Value = &quality;
-
-    Gdiplus::Status status = img.Save(wide_path.c_str(), &jpegClsid, &params);
+    Gdiplus::Status status;
+    if (use_png) {
+        status = img.Save(wide_path.c_str(), &encoderClsid, nullptr);
+    } else {
+        Gdiplus::EncoderParameters params;
+        ULONG quality = (ULONG)cfg_ag_jpeg_quality.get_value();
+        params.Count = 1;
+        params.Parameter[0].Guid = Gdiplus::EncoderQuality;
+        params.Parameter[0].Type = Gdiplus::EncoderParameterValueTypeLong;
+        params.Parameter[0].NumberOfValues = 1;
+        params.Parameter[0].Value = &quality;
+        status = img.Save(wide_path.c_str(), &encoderClsid, &params);
+    }
 
     if (status == Gdiplus::Ok) {
         m_status_text = L"Saved to " + wide_path;
