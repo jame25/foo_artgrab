@@ -15,3 +15,4 @@ extern cfg_bool cfg_ag_include_back_covers;
 extern cfg_bool cfg_ag_include_artist_images;
 extern cfg_string cfg_ag_back_cover_filename;
 extern cfg_string cfg_ag_artist_image_filename;
+extern cfg_int cfg_ag_save_format;
