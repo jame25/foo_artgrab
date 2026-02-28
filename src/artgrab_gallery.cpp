@@ -6,6 +6,7 @@
 #include "async_io_manager.h"
 #include <algorithm>
 #include <sstream>
+#include <cmath>
 
 #include "artgrab_preferences.h"
 
@@ -25,6 +26,23 @@ static std::string replace_extension(const std::string& filename, const char* ne
     return filename + new_ext;
 }
 
+// Strip content in parentheses and square brackets, e.g. "(Remastered)", "[Deluxe Edition]"
+static std::string strip_brackets(const std::string& s) {
+    std::string result;
+    result.reserve(s.size());
+    int paren = 0, square = 0;
+    for (char c : s) {
+        if (c == '(') { paren++; continue; }
+        if (c == ')') { if (paren > 0) paren--; continue; }
+        if (c == '[') { square++; continue; }
+        if (c == ']') { if (square > 0) square--; continue; }
+        if (paren == 0 && square == 0) result += c;
+    }
+    // Trim trailing whitespace left behind
+    while (!result.empty() && result.back() == ' ') result.pop_back();
+    return result;
+}
+
 namespace artgrab {
 
 // ---------------------------------------------------------------------------
@@ -40,6 +58,14 @@ GalleryWindow::GalleryWindow(const char* artist, const char* album, const char* 
     , m_scroll_y(0)
     , m_content_height(0)
     , m_save_button(NULL)
+    , m_artist_label(NULL)
+    , m_album_label(NULL)
+    , m_artist_edit(NULL)
+    , m_album_edit(NULL)
+    , m_search_button(NULL)
+    , m_search_panel_open(false)
+    , m_search_anim_t(0.0f)
+    , m_search_anim_opening(false)
 {
 }
 
@@ -92,32 +118,44 @@ LRESULT GalleryWindow::OnCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lPara
     // Disable Save until a selection is made
     ::EnableWindow(m_save_button, FALSE);
 
+    // Convert artist/album to wide strings for edit controls
+    auto to_wide = [](const std::string& s) -> std::wstring {
+        int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, NULL, 0);
+        std::wstring ws(len > 0 ? len - 1 : 0, L'\0');
+        if (len > 1) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
+        return ws;
+    };
+
+    std::wstring wArtist = to_wide(m_artist);
+    std::wstring wAlbum = to_wide(m_album);
+
+    // Create search panel controls (hidden initially)
+    m_artist_label = ::CreateWindowW(L"BUTTON", L"",
+        WS_CHILD | BS_OWNERDRAW,
+        0, 0, 24, 24, m_hWnd, (HMENU)(INT_PTR)ID_ARTIST_LABEL, NULL, NULL);
+
+    m_artist_edit = ::CreateWindowW(L"EDIT", wArtist.c_str(),
+        WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+        0, 0, 200, 24, m_hWnd, (HMENU)(INT_PTR)ID_ARTIST_EDIT, NULL, NULL);
+
+    m_album_label = ::CreateWindowW(L"BUTTON", L"",
+        WS_CHILD | BS_OWNERDRAW,
+        0, 0, 24, 24, m_hWnd, (HMENU)(INT_PTR)ID_ALBUM_LABEL, NULL, NULL);
+
+    m_album_edit = ::CreateWindowW(L"EDIT", wAlbum.c_str(),
+        WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+        0, 0, 200, 24, m_hWnd, (HMENU)(INT_PTR)ID_ALBUM_EDIT, NULL, NULL);
+
+    m_search_button = ::CreateWindowW(L"BUTTON", L"",
+        WS_CHILD | BS_OWNERDRAW,
+        0, 0, SEARCH_ICON_SIZE, 24, m_hWnd, (HMENU)(INT_PTR)ID_SEARCH_BUTTON, NULL, NULL);
+
     // If no album folder, permanently disable save
     if (m_album_folder.empty()) {
         m_status_text = L"No album folder available";
     }
 
-    // Initialize API states (only for APIs enabled in foo_artwork preferences)
-    const char* all_apis[] = { "iTunes", "Deezer", "Last.fm", "MusicBrainz", "Discogs" };
-    for (const char* api : all_apis) {
-        if (artgrab::is_api_enabled(api)) {
-            m_api_states.emplace_back(api);
-        }
-    }
-
-    // Add back covers pseudo-APIs if the preference is enabled
-    if (cfg_ag_include_back_covers) {
-        if (artgrab::is_api_enabled("MusicBrainz"))
-            m_api_states.emplace_back("MusicBrainz (Back)");
-        if (artgrab::is_api_enabled("Discogs"))
-            m_api_states.emplace_back("Discogs (Back)");
-    }
-
-    // Add artist images pseudo-API if the preference is enabled
-    if (cfg_ag_include_artist_images) {
-        if (artgrab::is_api_enabled("Deezer"))
-            m_api_states.emplace_back("Deezer (Artist)");
-    }
+    InitApiStates();
 
     if (m_status_text.empty()) {
         m_status_text = L"Searching...";
@@ -131,6 +169,8 @@ LRESULT GalleryWindow::OnCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lPara
 
 LRESULT GalleryWindow::OnDestroy(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)
 {
+    KillTimer(SEARCH_ANIM_TIMER_ID);
+    RemoveKeyboardHook();
     if (m_search) {
         m_search->cancel();
         m_search.reset();
@@ -152,11 +192,15 @@ LRESULT GalleryWindow::OnClose(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam
     return 0;
 }
 
-LRESULT GalleryWindow::OnNcDestroy(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
+LRESULT GalleryWindow::OnNcDestroy(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
 {
-    bHandled = FALSE;
+    // Must set bHandled = TRUE so ATL doesn't access 'this' after delete.
+    // We call DefWindowProc and clean up m_hWnd ourselves.
+    bHandled = TRUE;
+    LRESULT lRes = DefWindowProc(uMsg, wParam, lParam);
+    m_hWnd = NULL;
     delete this;
-    return 0;
+    return lRes;
 }
 
 LRESULT GalleryWindow::OnEraseBkgnd(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)
@@ -206,29 +250,40 @@ LRESULT GalleryWindow::OnPaint(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam
     Gdiplus::SolidBrush bgBrush(Gdiplus::Color(GetRValue(bgColor), GetGValue(bgColor), GetBValue(bgColor)));
     g.FillRectangle(&bgBrush, 0, 0, cw, ch);
 
-    // Title text
-    COLORREF textColor = GetSysColor(COLOR_WINDOWTEXT);
-    Gdiplus::SolidBrush textBrush(Gdiplus::Color(GetRValue(textColor), GetGValue(textColor), GetBValue(textColor)));
-    Gdiplus::Font titleFont(L"Segoe UI", 11, Gdiplus::FontStyleBold);
-
-    std::wstring title = L"Art for: ";
-    {
-        // Convert artist and album to wide strings
-        int len = MultiByteToWideChar(CP_UTF8, 0, m_artist.c_str(), -1, NULL, 0);
-        std::wstring wArtist(len > 0 ? len - 1 : 0, L'\0');
-        if (len > 1) MultiByteToWideChar(CP_UTF8, 0, m_artist.c_str(), -1, &wArtist[0], len);
-
-        len = MultiByteToWideChar(CP_UTF8, 0, m_album.c_str(), -1, NULL, 0);
-        std::wstring wAlbum(len > 0 ? len - 1 : 0, L'\0');
-        if (len > 1) MultiByteToWideChar(CP_UTF8, 0, m_album.c_str(), -1, &wAlbum[0], len);
-
-        title += wArtist + L" \u2014 " + wAlbum;
-    }
-    Gdiplus::RectF titleRect(THUMB_PADDING, 4.0f - m_scroll_y, (float)(cw - THUMB_PADDING * 2), 26.0f);
-    g.DrawString(title.c_str(), -1, &titleFont, titleRect, nullptr, &textBrush);
-
     // Paint the thumbnail grid
     PaintGrid(g);
+
+    // Paint floating search panel background (if open or animating)
+    if (m_search_anim_t > 0.0f) {
+        COLORREF faceBg = GetSysColor(COLOR_3DFACE);
+        Gdiplus::SolidBrush panelBrush(Gdiplus::Color(230,
+            GetRValue(faceBg), GetGValue(faceBg), GetBValue(faceBg)));
+        Gdiplus::Pen panelBorder(Gdiplus::Color(160, 160, 160));
+        int panel_y = ch - STATUS_BAR_HEIGHT - SEARCH_PANEL_HEIGHT - SEARCH_ICON_MARGIN;
+
+        // Calculate panel width (matching RecalcLayout)
+        int icon_label_w = 24;
+        int icon_btn_w = SEARCH_ICON_SIZE;
+        int gap = 4;
+        int margin = SEARCH_ICON_MARGIN;
+        int max_panel_w = cw * 85 / 100;
+        int fixed_w = icon_label_w + gap + icon_label_w + gap + icon_btn_w + gap * 2 + margin;
+        int edit_total = max_panel_w - fixed_w;
+        int edit_w = (std::max)(60, edit_total / 2);
+        int total_content_w = icon_label_w + gap + edit_w + gap + icon_label_w + gap + edit_w + gap + icon_btn_w + margin;
+
+        // Ease-out for background too
+        float eased = 1.0f - (1.0f - m_search_anim_t) * (1.0f - m_search_anim_t);
+        int panel_w = (int)(total_content_w * eased);
+        int panel_x = cw - panel_w;
+
+        Gdiplus::Rect panelRect(panel_x, panel_y, panel_w, SEARCH_PANEL_HEIGHT + SEARCH_ICON_MARGIN);
+        g.FillRectangle(&panelBrush, panelRect);
+        g.DrawLine(&panelBorder, panel_x, panel_y, cw, panel_y);
+    }
+
+    // Paint search icon overlay
+    PaintSearchIcon(g);
 
     // Paint status bar
     PaintStatusBar(g, client);
@@ -244,6 +299,22 @@ LRESULT GalleryWindow::OnPaint(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam
 LRESULT GalleryWindow::OnLButtonDown(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& /*bHandled*/)
 {
     POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+
+    // Check if search icon was clicked (bottom-right corner)
+    RECT client;
+    GetClientRect(&client);
+    int cw = client.right - client.left;
+    int ch = client.bottom - client.top;
+    int icon_x = cw - SEARCH_ICON_SIZE - SEARCH_ICON_MARGIN;
+    int icon_y = ch - STATUS_BAR_HEIGHT - SEARCH_ICON_SIZE - SEARCH_ICON_MARGIN;
+    RECT iconRect = { icon_x, icon_y,
+                      icon_x + SEARCH_ICON_SIZE,
+                      icon_y + SEARCH_ICON_SIZE };
+    if (PtInRect(&iconRect, pt)) {
+        ToggleSearchPanel();
+        return 0;
+    }
+
     int hit = HitTest(pt);
 
     if (hit >= 0) {
@@ -307,6 +378,11 @@ LRESULT GalleryWindow::OnMouseWheel(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lPara
 LRESULT GalleryWindow::OnCommand(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled)
 {
     WORD id = LOWORD(wParam);
+    if (id == ID_SEARCH_BUTTON) {
+        ResetSearch();
+        ShowSearchPanel(false);
+        return 0;
+    }
     if (id == ID_SAVE_BUTTON) {
         bool shift_held = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         DoSave(shift_held);
@@ -319,6 +395,27 @@ LRESULT GalleryWindow::OnCommand(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/
 // ---------------------------------------------------------------------------
 // Search
 // ---------------------------------------------------------------------------
+
+void GalleryWindow::InitApiStates()
+{
+    m_api_states.clear();
+    const char* all_apis[] = { "iTunes", "Deezer", "Last.fm", "MusicBrainz", "Discogs" };
+    for (const char* api : all_apis) {
+        if (artgrab::is_api_enabled(api)) {
+            m_api_states.emplace_back(api);
+        }
+    }
+    if (cfg_ag_include_back_covers) {
+        if (artgrab::is_api_enabled("MusicBrainz"))
+            m_api_states.emplace_back("MusicBrainz (Back)");
+        if (artgrab::is_api_enabled("Discogs"))
+            m_api_states.emplace_back("Discogs (Back)");
+    }
+    if (cfg_ag_include_artist_images) {
+        if (artgrab::is_api_enabled("Deezer"))
+            m_api_states.emplace_back("Deezer (Artist)");
+    }
+}
 
 void GalleryWindow::StartSearch()
 {
@@ -368,12 +465,56 @@ void GalleryWindow::StartSearch()
     int max_results = cfg_ag_max_results.get_value();
     if (max_results < 1) max_results = 3;
 
+    m_search_artist = strip_brackets(m_artist);
+    m_search_album = strip_brackets(m_album);
+
     m_search = std::make_shared<artwork_search>(
-        m_artist.c_str(), m_album.c_str(), max_results,
+        m_search_artist.c_str(), m_search_album.c_str(), max_results,
         cfg_ag_include_back_covers.get_value(),
         cfg_ag_include_artist_images.get_value(),
         on_result_cb, on_api_done_cb, on_all_done_cb);
     m_search->start();
+}
+
+void GalleryWindow::ResetSearch()
+{
+    // Cancel in-flight search
+    if (m_search) {
+        m_search->cancel();
+        m_search.reset();
+    }
+
+    // Clear results
+    m_cells.clear();
+    m_selected_index = -1;
+    m_all_done = false;
+    m_scroll_y = 0;
+    m_content_height = 0;
+    ::EnableWindow(m_save_button, FALSE);
+
+    // Read new values from edit controls
+    WCHAR buf[512];
+    ::GetWindowTextW(m_artist_edit, buf, 512);
+    {
+        int len = WideCharToMultiByte(CP_UTF8, 0, buf, -1, NULL, 0, NULL, NULL);
+        m_artist.resize(len > 0 ? len - 1 : 0);
+        if (len > 1) WideCharToMultiByte(CP_UTF8, 0, buf, -1, &m_artist[0], len, NULL, NULL);
+    }
+
+    ::GetWindowTextW(m_album_edit, buf, 512);
+    {
+        int len = WideCharToMultiByte(CP_UTF8, 0, buf, -1, NULL, 0, NULL, NULL);
+        m_album.resize(len > 0 ? len - 1 : 0);
+        if (len > 1) WideCharToMultiByte(CP_UTF8, 0, buf, -1, &m_album[0], len, NULL, NULL);
+    }
+
+    // Rebuild API states
+    InitApiStates();
+
+    m_status_text = L"Searching...";
+    StartSearch();
+    RecalcLayout();
+    InvalidateRect(NULL, FALSE);
 }
 
 void GalleryWindow::UpdateStatusText()
@@ -398,6 +539,225 @@ void GalleryWindow::UpdateStatusText()
     }
 }
 
+LRESULT GalleryWindow::OnKeyDown(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled)
+{
+    if (wParam == VK_ESCAPE && m_search_panel_open) {
+        ShowSearchPanel(false);
+        return 0;
+    }
+    bHandled = FALSE;
+    return 0;
+}
+
+LRESULT GalleryWindow::OnDrawItem(UINT /*uMsg*/, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+{
+    DRAWITEMSTRUCT* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+
+    // Common setup for all owner-drawn controls
+    if (dis->CtlID == ID_SEARCH_BUTTON || dis->CtlID == ID_ARTIST_LABEL || dis->CtlID == ID_ALBUM_LABEL) {
+        // Draw button background
+        COLORREF btnBg = GetSysColor(dis->itemState & ODS_SELECTED ? COLOR_3DSHADOW : COLOR_3DFACE);
+        HBRUSH hBrush = CreateSolidBrush(btnBg);
+        FillRect(dis->hDC, &dis->rcItem, hBrush);
+        DeleteObject(hBrush);
+
+        // Only draw edge on the search button
+        if (dis->CtlID == ID_SEARCH_BUTTON) {
+            DrawEdge(dis->hDC, &dis->rcItem, dis->itemState & ODS_SELECTED ? EDGE_SUNKEN : EDGE_RAISED, BF_RECT);
+        }
+
+        Gdiplus::Graphics g(dis->hDC);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+        int w = dis->rcItem.right - dis->rcItem.left;
+        int h = dis->rcItem.bottom - dis->rcItem.top;
+        float ox = (float)(dis->rcItem.left + (w - 16) / 2);
+        float oy = (float)(dis->rcItem.top + (h - 16) / 2);
+
+        COLORREF textColor = GetSysColor(COLOR_BTNTEXT);
+        Gdiplus::Color iconClr(GetRValue(textColor), GetGValue(textColor), GetBValue(textColor));
+
+        if (dis->CtlID == ID_SEARCH_BUTTON) {
+            // Search icon: magnifying glass
+            float size = 16.0f;
+            Gdiplus::Pen iconPen(iconClr, 1.5f);
+            iconPen.SetStartCap(Gdiplus::LineCapRound);
+            iconPen.SetEndCap(Gdiplus::LineCapRound);
+
+            float cx = ox + size * 0.42f;
+            float cy = oy + size * 0.42f;
+            float r = size * 0.28f;
+            g.DrawEllipse(&iconPen, cx - r, cy - r, r * 2, r * 2);
+
+            float angle = 0.785f;
+            float hx1 = cx + r * cosf(angle);
+            float hy1 = cy + r * sinf(angle);
+            float hx2 = ox + size * 0.88f;
+            float hy2 = oy + size * 0.88f;
+            g.DrawLine(&iconPen, hx1, hy1, hx2, hy2);
+        }
+        else if (dis->CtlID == ID_ARTIST_LABEL) {
+            // Artist icon: person silhouette (head circle + body arc)
+            Gdiplus::Pen iconPen(iconClr, 1.4f);
+            Gdiplus::SolidBrush iconBrush(iconClr);
+
+            // Head (circle)
+            float headR = 3.2f;
+            float headCx = ox + 8.0f;
+            float headCy = oy + 4.0f;
+            g.DrawEllipse(&iconPen, headCx - headR, headCy - headR, headR * 2, headR * 2);
+
+            // Body (arc/shoulders)
+            Gdiplus::GraphicsPath path;
+            path.AddArc(ox + 1.5f, oy + 9.0f, 13.0f, 10.0f, 180.0f, 180.0f);
+            g.DrawPath(&iconPen, &path);
+        }
+        else if (dis->CtlID == ID_ALBUM_LABEL) {
+            // Album icon: vinyl disc (two concentric circles + center dot)
+            Gdiplus::Pen iconPen(iconClr, 1.4f);
+            Gdiplus::SolidBrush iconBrush(iconClr);
+
+            float discCx = ox + 8.0f;
+            float discCy = oy + 8.0f;
+
+            // Outer circle (disc)
+            float outerR = 7.0f;
+            g.DrawEllipse(&iconPen, discCx - outerR, discCy - outerR, outerR * 2, outerR * 2);
+
+            // Inner circle (label area)
+            float innerR = 3.5f;
+            g.DrawEllipse(&iconPen, discCx - innerR, discCy - innerR, innerR * 2, innerR * 2);
+
+            // Center dot (spindle hole)
+            float dotR = 1.2f;
+            g.FillEllipse(&iconBrush, discCx - dotR, discCy - dotR, dotR * 2, dotR * 2);
+        }
+
+        return TRUE;
+    }
+    bHandled = FALSE;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard hook for Enter/Tab in search edit controls
+// ---------------------------------------------------------------------------
+
+GalleryWindow* GalleryWindow::s_hook_instance = nullptr;
+HHOOK GalleryWindow::s_keyboard_hook = NULL;
+
+LRESULT CALLBACK GalleryWindow::KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    if (nCode == HC_ACTION && !(lParam & 0x80000000) && s_hook_instance) {
+        HWND focus = ::GetFocus();
+        bool in_edit = (focus == s_hook_instance->m_artist_edit ||
+                        focus == s_hook_instance->m_album_edit);
+        if (in_edit) {
+            if (wParam == VK_RETURN) {
+                // Post to avoid re-entrancy issues with the hook
+                ::PostMessage(s_hook_instance->m_hWnd, WM_COMMAND,
+                    MAKEWPARAM(ID_SEARCH_BUTTON, BN_CLICKED), 0);
+                return 1; // Eat the keystroke
+            }
+            if (wParam == VK_TAB) {
+                // Toggle focus between the two edit fields
+                HWND other = (focus == s_hook_instance->m_artist_edit)
+                    ? s_hook_instance->m_album_edit
+                    : s_hook_instance->m_artist_edit;
+                ::SetFocus(other);
+                return 1;
+            }
+        }
+    }
+    return ::CallNextHookEx(s_keyboard_hook, nCode, wParam, lParam);
+}
+
+void GalleryWindow::InstallKeyboardHook()
+{
+    if (!s_keyboard_hook) {
+        s_hook_instance = this;
+        s_keyboard_hook = ::SetWindowsHookEx(WH_KEYBOARD, KeyboardHookProc,
+            NULL, ::GetCurrentThreadId());
+    }
+}
+
+void GalleryWindow::RemoveKeyboardHook()
+{
+    if (s_keyboard_hook) {
+        ::UnhookWindowsHookEx(s_keyboard_hook);
+        s_keyboard_hook = NULL;
+        s_hook_instance = nullptr;
+    }
+}
+
+void GalleryWindow::ToggleSearchPanel()
+{
+    ShowSearchPanel(!m_search_panel_open);
+}
+
+void GalleryWindow::ShowSearchPanel(bool show)
+{
+    m_search_panel_open = show;
+    m_search_anim_opening = show;
+
+    if (show) {
+        InstallKeyboardHook();
+    } else {
+        RemoveKeyboardHook();
+    }
+
+    // Don't show controls here — they'd appear at stale positions (0,0).
+    // OnTimer will show them after RecalcLayout positions them on the first tick.
+
+    // Start animation timer
+    SetTimer(SEARCH_ANIM_TIMER_ID, SEARCH_ANIM_INTERVAL_MS);
+}
+
+LRESULT GalleryWindow::OnTimer(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled)
+{
+    if (wParam == SEARCH_ANIM_TIMER_ID) {
+        bool was_zero = (m_search_anim_t == 0.0f);
+        float step = 0.08f; // ~12 frames to complete
+        if (m_search_anim_opening) {
+            m_search_anim_t += step;
+            if (m_search_anim_t >= 1.0f) {
+                m_search_anim_t = 1.0f;
+                KillTimer(SEARCH_ANIM_TIMER_ID);
+            }
+        } else {
+            m_search_anim_t -= step;
+            if (m_search_anim_t <= 0.0f) {
+                m_search_anim_t = 0.0f;
+                KillTimer(SEARCH_ANIM_TIMER_ID);
+                // Hide controls once fully closed
+                if (m_artist_label && ::IsWindow(m_artist_label)) ::ShowWindow(m_artist_label, SW_HIDE);
+                if (m_artist_edit && ::IsWindow(m_artist_edit)) ::ShowWindow(m_artist_edit, SW_HIDE);
+                if (m_album_label && ::IsWindow(m_album_label)) ::ShowWindow(m_album_label, SW_HIDE);
+                if (m_album_edit && ::IsWindow(m_album_edit)) ::ShowWindow(m_album_edit, SW_HIDE);
+                if (m_search_button && ::IsWindow(m_search_button)) ::ShowWindow(m_search_button, SW_HIDE);
+            }
+        }
+
+        // Position controls first, then show them
+        RecalcLayout();
+
+        // Show controls on the first tick after RecalcLayout has positioned them
+        if (was_zero && m_search_anim_opening) {
+            if (m_artist_label && ::IsWindow(m_artist_label)) ::ShowWindow(m_artist_label, SW_SHOW);
+            if (m_artist_edit && ::IsWindow(m_artist_edit)) ::ShowWindow(m_artist_edit, SW_SHOW);
+            if (m_album_label && ::IsWindow(m_album_label)) ::ShowWindow(m_album_label, SW_SHOW);
+            if (m_album_edit && ::IsWindow(m_album_edit)) ::ShowWindow(m_album_edit, SW_SHOW);
+            if (m_search_button && ::IsWindow(m_search_button)) ::ShowWindow(m_search_button, SW_SHOW);
+            if (m_artist_edit) ::SetFocus(m_artist_edit);
+        }
+
+        InvalidateRect(NULL, FALSE);
+        return 0;
+    }
+    bHandled = FALSE;
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Layout
 // ---------------------------------------------------------------------------
@@ -409,7 +769,7 @@ void GalleryWindow::RecalcLayout()
     int cw = client.right - client.left;
 
     int cols = (std::max)(1, (cw - THUMB_PADDING) / (THUMB_SIZE + THUMB_PADDING));
-    int title_height = 30;
+    int title_height = 0; // No permanent search bar - thumbnails start at top
     int cell_height = THUMB_SIZE + LABEL_HEIGHT + THUMB_PADDING;
     int separator_height = 28;
 
@@ -504,6 +864,53 @@ void GalleryWindow::RecalcLayout()
     if (m_save_button && ::IsWindow(m_save_button)) {
         ::MoveWindow(m_save_button, btn_x, btn_y, 80, 28, TRUE);
     }
+
+    // Position floating search panel controls at bottom-right with animation
+    if (m_search_anim_t > 0.0f) {
+        int ch = client.bottom - client.top;
+        int icon_label_w = 24;   // icon-sized labels
+        int icon_btn_w = SEARCH_ICON_SIZE;
+        int gap = 4;
+        int margin = SEARCH_ICON_MARGIN;
+        int h = 24;
+        int panel_y = ch - STATUS_BAR_HEIGHT - SEARCH_PANEL_HEIGHT - margin
+                      + (SEARCH_PANEL_HEIGHT - h) / 2;
+
+        // Ease-out curve: eased = 1 - (1 - t)^2
+        float eased = 1.0f - (1.0f - m_search_anim_t) * (1.0f - m_search_anim_t);
+
+        // Panel takes ~85% of window width
+        int max_panel_w = cw * 85 / 100;
+        // Calculate edit field widths from available space within capped width
+        int fixed_w = icon_label_w + gap + icon_label_w + gap + icon_btn_w + gap * 2 + margin;
+        int edit_total = max_panel_w - fixed_w;
+        int edit_w = (std::max)(60, edit_total / 2);
+        int total_content_w = icon_label_w + gap + edit_w + gap + icon_label_w + gap + edit_w + gap + icon_btn_w + margin;
+
+        // Anchor to right edge, slide in from the right
+        int slide_offset = (int)((1.0f - eased) * total_content_w);
+        int base_x = cw - total_content_w;
+
+        int x = base_x + slide_offset;
+        if (m_artist_label && ::IsWindow(m_artist_label))
+            ::MoveWindow(m_artist_label, x, panel_y, icon_label_w, h, TRUE);
+        x += icon_label_w + gap;
+
+        if (m_artist_edit && ::IsWindow(m_artist_edit))
+            ::MoveWindow(m_artist_edit, x, panel_y, edit_w, h, TRUE);
+        x += edit_w + gap;
+
+        if (m_album_label && ::IsWindow(m_album_label))
+            ::MoveWindow(m_album_label, x, panel_y, icon_label_w, h, TRUE);
+        x += icon_label_w + gap;
+
+        if (m_album_edit && ::IsWindow(m_album_edit))
+            ::MoveWindow(m_album_edit, x, panel_y, edit_w, h, TRUE);
+        x += edit_w + gap;
+
+        if (m_search_button && ::IsWindow(m_search_button))
+            ::MoveWindow(m_search_button, x, panel_y, icon_btn_w, h, TRUE);
+    }
 }
 
 int GalleryWindow::HitTest(POINT pt) const
@@ -532,7 +939,7 @@ void GalleryWindow::PaintGrid(Gdiplus::Graphics& g)
     GetClientRect(&client);
     int cw = client.right - client.left;
     int cols = (std::max)(1, (cw - THUMB_PADDING) / (THUMB_SIZE + THUMB_PADDING));
-    int title_height = 30;
+    int title_height = 0;
     int cell_height = THUMB_SIZE + LABEL_HEIGHT + THUMB_PADDING;
     int separator_height = 28;
 
@@ -669,6 +1076,44 @@ void GalleryWindow::PaintStatusBar(Gdiplus::Graphics& g, const RECT& client)
     Gdiplus::Font statusFont(L"Segoe UI", 9);
     Gdiplus::RectF textRect(8.0f, (float)(sy + 10), (float)(cw - 100), 20.0f);
     g.DrawString(m_status_text.c_str(), -1, &statusFont, textRect, nullptr, &textBrush);
+}
+
+void GalleryWindow::PaintSearchIcon(Gdiplus::Graphics& g)
+{
+    // Draw the search icon in the bottom-right corner, above the status bar
+    RECT client;
+    GetClientRect(&client);
+    int cw = client.right - client.left;
+    int ch = client.bottom - client.top;
+
+    // Hide the floating icon as soon as the panel starts opening
+    if (m_search_panel_open) return;
+
+    int icon_x = cw - SEARCH_ICON_SIZE - SEARCH_ICON_MARGIN;
+    int icon_y = ch - STATUS_BAR_HEIGHT - SEARCH_ICON_SIZE - SEARCH_ICON_MARGIN;
+
+    float ox = (float)(icon_x + 2);
+    float oy = (float)(icon_y + 2);
+    float size = 20.0f;
+
+    COLORREF textColor = GetSysColor(COLOR_WINDOWTEXT);
+    Gdiplus::Color iconColor(GetRValue(textColor), GetGValue(textColor), GetBValue(textColor));
+    Gdiplus::Pen iconPen(iconColor, 2.0f);
+    iconPen.SetStartCap(Gdiplus::LineCapRound);
+    iconPen.SetEndCap(Gdiplus::LineCapRound);
+
+    float cx = ox + size * 0.42f;
+    float cy = oy + size * 0.42f;
+    float r = size * 0.30f;
+
+    g.DrawEllipse(&iconPen, cx - r, cy - r, r * 2, r * 2);
+
+    float angle = 0.785f;
+    float hx1 = cx + r * cosf(angle);
+    float hy1 = cy + r * sinf(angle);
+    float hx2 = ox + size * 0.88f;
+    float hy2 = oy + size * 0.88f;
+    g.DrawLine(&iconPen, hx1, hy1, hx2, hy2);
 }
 
 // ---------------------------------------------------------------------------
