@@ -27,6 +27,9 @@ public:
         MESSAGE_HANDLER(WM_GETMINMAXINFO, OnGetMinMaxInfo)
         MESSAGE_HANDLER(WM_CLOSE, OnClose)
         MESSAGE_HANDLER(WM_NCDESTROY, OnNcDestroy)
+        MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+        MESSAGE_HANDLER(WM_DRAWITEM, OnDrawItem)
+        MESSAGE_HANDLER(WM_TIMER, OnTimer)
     END_MSG_MAP()
 
     void Show(HWND parent);
@@ -45,6 +48,9 @@ private:
     LRESULT OnGetMinMaxInfo(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnClose(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnNcDestroy(UINT, WPARAM, LPARAM, BOOL&);
+    LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+    LRESULT OnDrawItem(UINT, WPARAM, LPARAM, BOOL&);
+    LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
 
     // Thumbnail cell data
     struct ThumbnailCell {
@@ -79,14 +85,28 @@ private:
     void DoSave(bool shift_held);
     void DoPreview(int index);
     void StartSearch();
+    void ResetSearch();
+    void InitApiStates();
     void UpdateStatusText();
+    void ToggleSearchPanel();
+    void ShowSearchPanel(bool show);
+    void PaintSearchIcon(Gdiplus::Graphics& g);
 
     // JPEG encoder helper
     static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid);
 
+    // Keyboard hook for Enter/Tab in search edit controls
+    void InstallKeyboardHook();
+    void RemoveKeyboardHook();
+    static LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    static GalleryWindow* s_hook_instance;
+    static HHOOK s_keyboard_hook;
+
     // Search state
     std::string m_artist;
     std::string m_album;
+    std::string m_search_artist;
+    std::string m_search_album;
     std::string m_file_path;
     std::string m_album_folder;
     std::shared_ptr<artwork_search> m_search;
@@ -106,6 +126,16 @@ private:
 
     // Controls
     HWND m_save_button;
+    HWND m_artist_label;
+    HWND m_album_label;
+    HWND m_artist_edit;
+    HWND m_album_edit;
+    HWND m_search_button;
+    bool m_search_panel_open;
+
+    // Search panel animation
+    float m_search_anim_t;       // 0.0 = closed, 1.0 = fully open
+    bool m_search_anim_opening;  // true = animating open, false = animating closed
 
     // Layout constants
     static const int THUMB_SIZE = 150;
@@ -116,6 +146,16 @@ private:
     static const int MIN_HEIGHT = 300;
 
     static const int ID_SAVE_BUTTON = 2001;
+    static const int ID_SEARCH_BUTTON = 2002;
+    static const int ID_ARTIST_EDIT = 2003;
+    static const int ID_ALBUM_EDIT = 2004;
+    static const int ID_ARTIST_LABEL = 2005;
+    static const int ID_ALBUM_LABEL = 2006;
+    static const int SEARCH_ICON_SIZE = 28;
+    static const int SEARCH_ICON_MARGIN = 8;
+    static const int SEARCH_PANEL_HEIGHT = 36;
+    static const UINT_PTR SEARCH_ANIM_TIMER_ID = 3001;
+    static const int SEARCH_ANIM_INTERVAL_MS = 16; // ~60fps
 
     // Dark mode
     fb2k::CCoreDarkModeHooks m_darkMode;
