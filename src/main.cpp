@@ -2,7 +2,7 @@
 
 DECLARE_COMPONENT_VERSION(
     "Artwork Grabber",
-    "1.0.6",
+    "1.0.7",
     "Browse and download album artwork from multiple APIs.\n"
     "Click download arrow in foo_artwork panel to access."
 );

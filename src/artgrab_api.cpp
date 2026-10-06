@@ -270,11 +270,24 @@ void artwork_search::search_itunes() {
 // ============================================================================
 
 void artwork_search::search_deezer() {
-    pfc::string8 search_query;
-    search_query << "artist:\"" << m_artist << "\" track:\"" << m_album << "\"";
+    search_deezer_query(true);
+}
 
-    pfc::string8 url = "https://api.deezer.com/search?q=";
-    url << artgrab::url_encode(search_query) << "&limit=15";
+void artwork_search::search_deezer_query(bool quoted) {
+    // Follow foo_artwork's free-text search and bounded unquoted retry, but
+    // search albums: the gallery supplies an album name, not a track title.
+    auto clean = [](const char* text) {
+        std::string value = text ? text : "";
+        for (char& c : value) {
+            if (c == '"' || c == '\\' || static_cast<unsigned char>(c) < 0x20) c = ' ';
+        }
+        return value;
+    };
+    const auto artist = clean(m_artist);
+    const auto album = clean(m_album);
+    const auto query = quoted ? "\"" + artist + "\" \"" + album + "\"" : artist + " " + album;
+    pfc::string8 url = "https://api.deezer.com/search/album?q=";
+    url << artgrab::url_encode(query.c_str()) << "&limit=50";
 
     pfc::string8 artist_str = m_artist;
     pfc::string8 album_str = m_album;
@@ -283,7 +296,7 @@ void artwork_search::search_deezer() {
 
     auto self = shared_from_this();
     async_io_manager::instance().http_get_async(url,
-        [self, artist_str, album_str, max_results, do_artist_images](bool success, const pfc::string8& response, const pfc::string8& error) {
+        [self, artist_str, album_str, max_results, do_artist_images, quoted](bool success, const pfc::string8& response, const pfc::string8& error) {
             if (self->m_cancelled) {
                 self->api_finished("Deezer", false);
                 if (do_artist_images) self->api_finished("Deezer (Artist)", false);
@@ -300,6 +313,10 @@ void artwork_search::search_deezer() {
             std::vector<pfc::string8> artist_ids;
             if (!parse_deezer_json_multi(artist_str, album_str, response, urls, max_results,
                     do_artist_images ? &artist_ids : nullptr) || urls.empty()) {
+                if (quoted) {
+                    self->search_deezer_query(false);
+                    return;
+                }
                 self->api_finished("Deezer", false);
                 if (do_artist_images) self->api_finished("Deezer (Artist)", false);
                 return;
@@ -726,91 +743,48 @@ bool artwork_search::parse_deezer_json_multi(const char* artist, const char* alb
     const pfc::string8& json_in, std::vector<pfc::string8>& urls, int max_results,
     std::vector<pfc::string8>* artist_ids) {
     try {
-        std::string json_data(json_in.get_ptr());
-        json data = json::parse(json_data);
+        const auto data = json::parse(std::string(json_in.get_ptr()));
+        if (!data.is_object() || data.contains("error") ||
+            !data.contains("data") || !data["data"].is_array()) return false;
 
-        if (!data.contains("total") || data["total"].get<int>() == 0)
-            return false;
-
-        // Sort by rank descending
-        std::sort(data["data"].begin(), data["data"].end(),
-            [](const json& a, const json& b) {
-                return a["rank"].get<int>() > b["rank"].get<int>();
-            });
-
-        json results = data["data"];
-        std::string artist_str(artist);
-        std::string album_str(album);
+        auto string_field = [](const json& item, const char* key) -> std::string {
+            const auto it = item.find(key);
+            return it != item.end() && it->is_string() ? it->get<std::string>() : "";
+        };
+        const std::string artist_str(artist);
+        const std::string album_str(album);
         std::set<std::string> seen_urls;
         std::set<std::string> seen_artist_ids;
 
-        // Helper to extract artist ID from a Deezer search result item
-        auto collect_artist_id = [&](const json& item) {
-            if (artist_ids && item.contains("artist") && item["artist"].contains("id") && item["artist"]["id"].is_number_integer()) {
-                std::string id = std::to_string(item["artist"]["id"].get<int64_t>());
-                if (seen_artist_ids.find(id) == seen_artist_ids.end()) {
-                    seen_artist_ids.insert(id);
-                    artist_ids->push_back(id.c_str());
-                }
-            }
-        };
+        // Album search returns covers on each result itself, without a track
+        // rank or nested album object. Keep API order, prioritizing exact titles.
+        for (int pass = 0; pass < 2; ++pass) {
+            for (const auto& item : data["data"]) {
+                if ((int)urls.size() >= max_results) break;
+                if (!item.is_object() || !item.contains("artist") || !item["artist"].is_object()) continue;
+                const auto result_artist = string_field(item["artist"], "name");
+                if (result_artist.empty() || !artists_match(result_artist, artist_str)) continue;
+                const auto title = string_field(item, "title");
+                if (title.empty()) continue;
+                const bool exact = strings_match_fuzzy(title, album_str);
+                if ((pass == 0) != exact) continue;
 
-        // Pass 1: exact artist+title match
-        for (const auto& item : results) {
-            if ((int)urls.size() >= max_results) break;
+                auto cover = string_field(item, "cover_xl");
+                if (cover.empty()) cover = string_field(item, "cover_big");
+                if (cover.empty()) continue;
+                // Use Deezer's supplied CDN URL, as foo_artwork does. Invented
+                // image sizes can fail even when the original URL is valid.
+                if (seen_urls.insert(cover).second) urls.push_back(cover.c_str());
 
-            std::string result_title = item["title"].get<std::string>();
-            std::string result_artist = item["artist"]["name"].get<std::string>();
-
-            if (strings_match_fuzzy(result_title, album_str) && artists_match(result_artist, artist_str)) {
-                pfc::string8 art_url;
-                if (item.contains("album") && item["album"].contains("cover_xl")) {
-                    art_url = item["album"]["cover_xl"].get<std::string>().c_str();
-                } else if (item.contains("album") && item["album"].contains("cover_big")) {
-                    art_url = item["album"]["cover_big"].get<std::string>().c_str();
-                }
-
-                if (!art_url.is_empty()) {
-                    art_url = unescape_json_slashes(art_url);
-                    art_url.replace_string("1000x1000", "1200x1200");
-
-                    std::string url_key(art_url.get_ptr());
-                    if (seen_urls.find(url_key) == seen_urls.end()) {
-                        seen_urls.insert(url_key);
-                        urls.push_back(art_url);
+                const auto& result_artist_data = item["artist"];
+                if (artist_ids && result_artist_data.contains("id") && result_artist_data["id"].is_number_integer()) {
+                    const auto id = result_artist_data["id"].get<int64_t>();
+                    if (id > 0 && seen_artist_ids.insert(std::to_string(id)).second) {
+                        artist_ids->push_back(std::to_string(id).c_str());
                     }
                 }
-                collect_artist_id(item);
             }
         }
-
-        // Pass 2: artist-only fallback
-        for (const auto& item : results) {
-            if ((int)urls.size() >= max_results) break;
-
-            std::string result_artist = item["artist"]["name"].get<std::string>();
-            if (!artists_match(result_artist, artist_str)) continue;
-
-            pfc::string8 art_url;
-            if (item.contains("album") && item["album"].contains("cover_xl")) {
-                art_url = item["album"]["cover_xl"].get<std::string>().c_str();
-            } else if (item.contains("album") && item["album"].contains("cover_big")) {
-                art_url = item["album"]["cover_big"].get<std::string>().c_str();
-            }
-
-            if (!art_url.is_empty()) {
-                art_url = unescape_json_slashes(art_url);
-                art_url.replace_string("1000x1000", "1200x1200");
-                collect_artist_id(item);
-
-                std::string url_key(art_url.get_ptr());
-                if (seen_urls.find(url_key) == seen_urls.end()) {
-                    seen_urls.insert(url_key);
-                    urls.push_back(art_url);
-                }
-            }
-        }
-
         return !urls.empty();
     } catch (const std::exception&) {
         return false;

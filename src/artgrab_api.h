@@ -55,6 +55,7 @@ private:
 
     void search_itunes();
     void search_deezer();
+    void search_deezer_query(bool quoted);
     void search_lastfm();
     void search_musicbrainz();
     void search_discogs();
