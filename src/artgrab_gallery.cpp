@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <sstream>
 #include <cmath>
+#include <set>
 
 #include "artgrab_preferences.h"
 
@@ -43,16 +44,65 @@ static std::string strip_brackets(const std::string& s) {
     return result;
 }
 
+// State shared between Save-to-tag's worker (run) and completion (on_done) callbacks
+struct TagWriteJob {
+    metadb_handle_list targets;        // All requested tracks, used for the metadb refresh
+    std::vector<std::string> paths;    // Unique local files that support embedded artwork
+    size_t skipped = 0;                // Files that are not local or don't support embedded artwork
+    bool now_playing = false;
+    album_art_data_ptr art_data;
+    GUID art_guid = album_art_ids::cover_front;
+
+    // Results, written by the worker and read once it has finished
+    std::set<std::string> written;
+    size_t failed = 0;
+    std::string first_error;
+
+    void add_failure(const char* message) {
+        if (failed++ == 0) first_error = message;
+    }
+};
+
+static std::wstring format_tag_write_status(const TagWriteJob& job, bool was_aborted)
+{
+    std::wstring error = pfc::stringcvt::string_wide_from_utf8(job.first_error.c_str()).get_ptr();
+
+    if (job.paths.size() == 1 && job.skipped == 0) {
+        if (!job.written.empty()) {
+            return job.now_playing ? L"Saved artwork to tag of currently playing file"
+                                   : L"Saved artwork to tag of selected file";
+        }
+        if (was_aborted) return L"Save-to-tag cancelled";
+        return L"Save-to-tag failed: " + error;
+    }
+
+    std::wostringstream ss;
+    ss << L"Saved artwork to tags of " << job.written.size() << L" of "
+       << (job.paths.size() + job.skipped) << L" files";
+
+    std::vector<std::wstring> details;
+    if (job.skipped > 0) details.push_back(std::to_wstring(job.skipped) + L" skipped");
+    if (job.failed > 0) details.push_back(std::to_wstring(job.failed) + L" failed: " + error);
+    if (was_aborted) details.push_back(L"cancelled");
+    for (size_t i = 0; i < details.size(); ++i) {
+        ss << (i == 0 ? L" (" : L", ") << details[i];
+    }
+    if (!details.empty()) ss << L")";
+    return ss.str();
+}
+
 namespace artgrab {
 
 // ---------------------------------------------------------------------------
 // Construction / Destruction
 // ---------------------------------------------------------------------------
 
-GalleryWindow::GalleryWindow(const char* artist, const char* album, const char* file_path)
+GalleryWindow::GalleryWindow(const char* artist, const char* album, const char* file_path,
+                             metadb_handle_list_cref tag_targets)
     : m_artist(artist ? artist : "")
     , m_album(album ? album : "")
     , m_file_path(file_path ? file_path : "")
+    , m_tag_write_busy(false)
     , m_selected_index(-1)
     , m_all_done(false)
     , m_scroll_y(0)
@@ -68,6 +118,7 @@ GalleryWindow::GalleryWindow(const char* artist, const char* album, const char* 
     , m_search_anim_t(0.0f)
     , m_search_anim_opening(false)
 {
+    m_tag_targets.add_items(tag_targets);
 }
 
 GalleryWindow::~GalleryWindow()
@@ -339,7 +390,7 @@ LRESULT GalleryWindow::OnLButtonDown(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lP
         if (!m_album_folder.empty()) {
             ::EnableWindow(m_save_button, TRUE);
         }
-        ::EnableWindow(m_save_to_tag_button, TRUE);
+        ::EnableWindow(m_save_to_tag_button, !m_tag_write_busy);
     } else {
         // Deselect
         if (m_selected_index >= 0 && m_selected_index < (int)m_cells.size()) {
@@ -1297,69 +1348,40 @@ void GalleryWindow::DoSave(bool shift_held)
     InvalidateRect(NULL, FALSE);
 }
 
-void GalleryWindow::DoSaveToTag()
+album_art_data_ptr GalleryWindow::EncodeForTag(const artwork_entry& entry, std::wstring& error)
 {
-    if (m_selected_index < 0 || m_selected_index >= (int)m_cells.size()) return;
-
-    // Check if track is currently playing
-    metadb_handle_ptr track;
-    if (!playback_control::get()->get_now_playing(track)) {
-        m_status_text = L"Save-to-tag failed: no track currently playing";
-        InvalidateRect(NULL, FALSE);
-        return;
-    }
-
-    const char* playing_path = track->get_path();
-    if (!playing_path || filesystem::g_is_remote_or_unrecognized(playing_path)) {
-        m_status_text = L"Save-to-tag failed: currently playing item is not a local file";
-        InvalidateRect(NULL, FALSE);
-        return;
-    }
-
-    if (!album_art_editor::g_is_supported_path(playing_path)) {
-        m_status_text = L"Save-to-tag failed: file format does not support embedded artwork";
-        InvalidateRect(NULL, FALSE);
-        return;
-    }
-
-    const artwork_entry& entry = m_cells[m_selected_index].entry;
     if (entry.data.get_size() == 0) {
-        m_status_text = L"Save-to-tag failed: no image data available";
-        InvalidateRect(NULL, FALSE);
-        return;
+        error = L"no image data available";
+        return album_art_data_ptr();
     }
 
     // Convert/encode image data using configured save format (JPEG or PNG)
     IStream* in_stream = SHCreateMemStream(entry.data.get_ptr(), (UINT)entry.data.get_size());
     if (!in_stream) {
-        m_status_text = L"Save-to-tag failed: could not read image data";
-        InvalidateRect(NULL, FALSE);
-        return;
+        error = L"could not read image data";
+        return album_art_data_ptr();
     }
 
     Gdiplus::Image img(in_stream);
     in_stream->Release();
 
     if (img.GetLastStatus() != Gdiplus::Ok) {
-        m_status_text = L"Save-to-tag failed: invalid image data";
-        InvalidateRect(NULL, FALSE);
-        return;
+        error = L"invalid image data";
+        return album_art_data_ptr();
     }
 
     CLSID encoderClsid;
     bool use_png = (cfg_ag_save_format.get_value() == 1);
     const WCHAR* mime = use_png ? L"image/png" : L"image/jpeg";
     if (GetEncoderClsid(mime, &encoderClsid) < 0) {
-        m_status_text = use_png ? L"Save-to-tag failed: PNG encoder not found" : L"Save-to-tag failed: JPEG encoder not found";
-        InvalidateRect(NULL, FALSE);
-        return;
+        error = use_png ? L"PNG encoder not found" : L"JPEG encoder not found";
+        return album_art_data_ptr();
     }
 
     IStream* out_stream = nullptr;
     if (FAILED(CreateStreamOnHGlobal(NULL, TRUE, &out_stream))) {
-        m_status_text = L"Save-to-tag failed: out of memory";
-        InvalidateRect(NULL, FALSE);
-        return;
+        error = L"out of memory";
+        return album_art_data_ptr();
     }
 
     Gdiplus::Status status;
@@ -1378,9 +1400,8 @@ void GalleryWindow::DoSaveToTag()
 
     if (status != Gdiplus::Ok) {
         out_stream->Release();
-        m_status_text = L"Save-to-tag failed: image encoding error";
-        InvalidateRect(NULL, FALSE);
-        return;
+        error = L"image encoding error";
+        return album_art_data_ptr();
     }
 
     STATSTG stat = {};
@@ -1392,61 +1413,200 @@ void GalleryWindow::DoSaveToTag()
     if (!pData || img_size == 0) {
         if (pData) GlobalUnlock(hMem);
         out_stream->Release();
-        m_status_text = L"Save-to-tag failed: memory lock error";
-        InvalidateRect(NULL, FALSE);
-        return;
+        error = L"memory lock error";
+        return album_art_data_ptr();
     }
 
     album_art_data_ptr art_data = album_art_data_impl::g_create(pData, img_size);
     GlobalUnlock(hMem);
     out_stream->Release();
+    return art_data;
+}
 
-    // Determine target artwork GUID
-    GUID art_guid = album_art_ids::cover_front;
-    if (is_back_cover(entry)) {
-        art_guid = album_art_ids::cover_back;
-    } else if (is_artist_image(entry)) {
-        art_guid = album_art_ids::artist;
-    }
+void GalleryWindow::DoSaveToTag()
+{
+    if (m_selected_index < 0 || m_selected_index >= (int)m_cells.size()) return;
+    if (m_tag_write_busy) return;
 
-    try {
-        abort_callback_dummy abort;
+    auto job = std::make_shared<TagWriteJob>();
 
-        // Acquire write lock to coordinate with playback decoder
-        file_lock_ptr lock = file_lock_manager::get()->acquire_write(playing_path, abort);
-
-        album_art_editor_instance_ptr editor = album_art_editor::g_open(nullptr, playing_path, abort);
-        if (editor.is_empty()) {
-            m_status_text = L"Save-to-tag failed: could not open file for editing";
+    // Write to the tracks the gallery was opened for, or fall back to the currently playing track
+    if (m_tag_targets.get_count() > 0) {
+        job->targets.add_items(m_tag_targets);
+    } else {
+        metadb_handle_ptr track;
+        if (!playback_control::get()->get_now_playing(track)) {
+            m_status_text = L"Save-to-tag failed: no track currently playing";
             InvalidateRect(NULL, FALSE);
             return;
         }
+        job->targets.add_item(track);
+        job->now_playing = true;
+    }
 
-        editor->set(art_guid, art_data, abort);
-        editor->commit(abort);
+    // Collect unique local files that support embedded artwork. Several tracks can share
+    // one physical file (subsongs, embedded cuesheets), so dedupe by path.
+    static_api_ptr_t<titleformat_compiler> compiler;
+    titleformat_object::ptr tf_album;
+    compiler->compile_safe_ex(tf_album, "%album artist%|%album%");
 
-        // Explicitly release lock before refreshing
-        lock.release();
+    std::set<std::string> seen_paths;
+    std::set<std::string> albums;
+    bool any_not_local = false;
+    for (size_t i = 0; i < job->targets.get_count(); ++i) {
+        const metadb_handle_ptr& track = job->targets[i];
+        const char* path = track->get_path();
+        if (path && !seen_paths.insert(path).second) continue;
+        if (!path || filesystem::g_is_remote_or_unrecognized(path)) {
+            any_not_local = true;
+            job->skipped++;
+            continue;
+        }
+        if (!album_art_editor::g_is_supported_path(path)) {
+            job->skipped++;
+            continue;
+        }
+        job->paths.push_back(path);
 
-        // Invalidate foo_artwork cache and refresh
-        artgrab::invalidate_artwork_cache(m_artist.c_str(), m_album.c_str());
-        artgrab::refresh_artwork_panel();
+        pfc::string8 album_key;
+        track->format_title(nullptr, album_key, tf_album, nullptr);
+        albums.insert(album_key.get_ptr());
+    }
 
-        // Dispatch metadb refresh for foobar2000
-        static_api_ptr_t<metadb_io>()->dispatch_refresh(track);
+    if (job->paths.empty()) {
+        if (job->skipped > 1) {
+            m_status_text = L"Save-to-tag failed: no selected file supports embedded artwork";
+        } else if (any_not_local) {
+            m_status_text = job->now_playing ? L"Save-to-tag failed: currently playing item is not a local file"
+                                             : L"Save-to-tag failed: selected item is not a local file";
+        } else {
+            m_status_text = L"Save-to-tag failed: file format does not support embedded artwork";
+        }
+        InvalidateRect(NULL, FALSE);
+        return;
+    }
 
-        m_status_text = L"Saved artwork to tag of currently playing file";
+    const artwork_entry& entry = m_cells[m_selected_index].entry;
+    std::wstring error;
+    job->art_data = EncodeForTag(entry, error);
+    if (job->art_data.is_empty()) {
+        m_status_text = L"Save-to-tag failed: " + error;
+        InvalidateRect(NULL, FALSE);
+        return;
+    }
+
+    // Determine target artwork GUID
+    if (is_back_cover(entry)) {
+        job->art_guid = album_art_ids::cover_back;
+    } else if (is_artist_image(entry)) {
+        job->art_guid = album_art_ids::artist;
+    }
+
+    if (job->paths.size() > 1) {
+        std::wostringstream msg;
+        msg << L"Embed the selected artwork into " << job->paths.size() << L" files?";
+        if (albums.size() > 1) {
+            msg << L"\n\nWarning: these files belong to " << albums.size() << L" different albums.";
+        }
+        UINT icon = albums.size() > 1 ? MB_ICONWARNING : MB_ICONQUESTION;
+        if (::MessageBoxW(m_hWnd, msg.str().c_str(), L"Art Grab", MB_YESNO | icon) != IDYES) return;
+    }
+
+    // Worker: write each file, recording failures and continuing with the rest
+    auto run = [job](threaded_process_status& status, abort_callback& abort) {
+        const size_t count = job->paths.size();
+        for (size_t i = 0; i < count; ++i) {
+            abort.check();
+            const char* path = job->paths[i].c_str();
+            status.set_progress(i, count);
+            status.set_item_path(path);
+            try {
+                // Acquire write lock to coordinate with playback decoder
+                file_lock_ptr lock = file_lock_manager::get()->acquire_write(path, abort);
+
+                album_art_editor_instance_ptr editor = album_art_editor::g_open(nullptr, path, abort);
+                if (editor.is_empty()) {
+                    job->add_failure("could not open file for editing");
+                    continue;
+                }
+
+                editor->set(job->art_guid, job->art_data, abort);
+                editor->commit(abort);
+                job->written.insert(job->paths[i]);
+            }
+            catch (const exception_aborted&) {
+                throw;
+            }
+            catch (const std::exception& e) {
+                job->add_failure(e.what());
+            }
+            catch (...) {
+                job->add_failure("unknown error");
+            }
+        }
+        status.set_progress(count, count);
+    };
+
+    // Completion (main thread): refresh what was written and report the outcome
+    HWND hwnd = m_hWnd;
+    GalleryWindow* self = this;
+    std::string artist = m_artist;
+    std::string album = m_album;
+    auto on_done = [job, self, hwnd, artist, album](threaded_process_callback::ctx_t, bool was_aborted) {
+        if (!job->written.empty()) {
+            // Invalidate foo_artwork cache and refresh
+            artgrab::invalidate_artwork_cache(artist.c_str(), album.c_str());
+            artgrab::refresh_artwork_panel();
+
+            // Dispatch metadb refresh for every requested track stored in a modified file
+            metadb_handle_list refresh;
+            for (size_t i = 0; i < job->targets.get_count(); ++i) {
+                const char* path = job->targets[i]->get_path();
+                if (path && job->written.count(path)) refresh.add_item(job->targets[i]);
+            }
+            static_api_ptr_t<metadb_io>()->dispatch_refresh(refresh);
+        }
+
+        // The gallery may have been closed while files were being written
+        if (!::IsWindow(hwnd)) return;
+        self->m_tag_write_busy = false;
+        bool has_selection = self->m_selected_index >= 0 && self->m_selected_index < (int)self->m_cells.size();
+        ::EnableWindow(self->m_save_to_tag_button, has_selection);
+        self->m_status_text = format_tag_write_status(*job, was_aborted);
+        self->InvalidateRect(NULL, FALSE);
+    };
+
+    m_tag_write_busy = true;
+    ::EnableWindow(m_save_to_tag_button, FALSE);
+
+    if (job->paths.size() == 1) {
+        // A single file is quick to write; do it inline without a progress dialog
+        threaded_process_status status;
+        abort_callback_dummy abort;
+        run(status, abort);
+        on_done(hwnd, false);
+        return;
+    }
+
+    m_status_text = L"Saving artwork to tags...";
+    InvalidateRect(NULL, FALSE);
+
+    // Parent the progress dialog to the main window so it survives the gallery being closed
+    auto callback = threaded_process_callback_lambda::create();
+    callback->m_run = run;
+    callback->m_on_done = on_done;
+    try {
+        threaded_process::g_run_modeless(callback,
+            threaded_process::flag_show_progress | threaded_process::flag_show_item | threaded_process::flag_show_abort,
+            core_api::get_main_window(), "Embedding artwork");
     }
     catch (const std::exception& e) {
-        std::wostringstream ss;
-        ss << L"Save-to-tag failed: " << e.what();
-        m_status_text = ss.str();
+        m_tag_write_busy = false;
+        ::EnableWindow(m_save_to_tag_button, TRUE);
+        m_status_text = L"Save-to-tag failed: ";
+        m_status_text += pfc::stringcvt::string_wide_from_utf8(e.what()).get_ptr();
+        InvalidateRect(NULL, FALSE);
     }
-    catch (...) {
-        m_status_text = L"Save-to-tag failed: unknown error";
-    }
-
-    InvalidateRect(NULL, FALSE);
 }
 
 void GalleryWindow::DoPreview(int index)

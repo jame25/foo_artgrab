@@ -9,7 +9,9 @@ namespace artgrab {
 
 class GalleryWindow : public CWindowImpl<GalleryWindow> {
 public:
-    GalleryWindow(const char* artist, const char* album, const char* file_path);
+    // tag_targets: tracks Save-to-tag writes to; empty means the currently playing track
+    GalleryWindow(const char* artist, const char* album, const char* file_path,
+                  metadb_handle_list_cref tag_targets = metadb_handle_list());
     ~GalleryWindow();
 
     DECLARE_WND_CLASS_EX(L"ArtGrabGallery", CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW, COLOR_WINDOW);
@@ -93,6 +95,9 @@ private:
     void ShowSearchPanel(bool show);
     void PaintSearchIcon(Gdiplus::Graphics& g);
 
+    // Re-encode entry in the configured save format for embedding; returns empty ptr and sets error on failure
+    static album_art_data_ptr EncodeForTag(const artwork_entry& entry, std::wstring& error);
+
     // JPEG encoder helper
     static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid);
 
@@ -111,6 +116,10 @@ private:
     std::string m_file_path;
     std::string m_album_folder;
     std::shared_ptr<artwork_search> m_search;
+
+    // Save-to-tag targets (empty = currently playing track)
+    metadb_handle_list m_tag_targets;
+    bool m_tag_write_busy;
 
     // Results
     std::vector<ThumbnailCell> m_cells;

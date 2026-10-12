@@ -27,7 +27,7 @@ public:
 
     bool get_item_description(unsigned p_index, pfc::string_base& p_out) override {
         if (p_index == 0) {
-            p_out = "Browse and download album artwork for the selected track";
+            p_out = "Browse and download album artwork for the selected tracks";
             return true;
         }
         return false;
@@ -52,7 +52,8 @@ public:
         track->format_title(nullptr, album, tf_album, nullptr);
         track->format_title(nullptr, path, tf_path, nullptr);
 
-        auto* gallery = new artgrab::GalleryWindow(artist.get_ptr(), album.get_ptr(), path.get_ptr());
+        // Search using the first track; Save-to-tag writes to the whole selection
+        auto* gallery = new artgrab::GalleryWindow(artist.get_ptr(), album.get_ptr(), path.get_ptr(), p_data);
         gallery->Show(core_api::get_main_window());
     }
 
